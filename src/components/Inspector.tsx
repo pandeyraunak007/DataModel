@@ -1,5 +1,5 @@
 import { useDeferredValue, useMemo, useState } from "react";
-import { modelSubtitle, pattern, ROLE_LABEL, tableRole } from "../../shared/intent.ts";
+import { columnClass, modelSubtitle, pattern, ROLE_LABEL, tableRole } from "../../shared/intent.ts";
 import { uid, type RefAction, type Table, type TableRole } from "../../shared/types.ts";
 import { validateModel } from "../../shared/validate.ts";
 import { useStore } from "../store.ts";
@@ -124,6 +124,15 @@ function TableInspector({ table }: { table: Table }) {
                       <label><input type="checkbox" checked={c.autoIncrement} onChange={(e) => s.updateColumn(table.id, c.id, { autoIncrement: e.target.checked })} /> Auto increment</label>
                     </div>
                     <div className="prop"><span>Default</span><input className="mono" value={c.default ?? ""} onChange={(e) => s.updateColumn(table.id, c.id, { default: e.target.value || undefined })} /></div>
+                    <div className="prop">
+                      <span>Classification</span>
+                      <select value={c.classification ?? ""} onChange={(e) => s.updateColumn(table.id, c.id, { classification: (e.target.value || undefined) as typeof c.classification })}>
+                        <option value="">Auto{columnClass({ name: c.name }) ? ` (${columnClass({ name: c.name })!.toUpperCase()})` : " (none)"}</option>
+                        <option value="pii">PII</option>
+                        <option value="sensitive">Sensitive</option>
+                        <option value="none">None</option>
+                      </select>
+                    </div>
                     <div className="prop col"><span>Description</span><textarea rows={2} value={c.comment ?? ""} onChange={(e) => s.updateColumn(table.id, c.id, { comment: e.target.value || undefined })} /></div>
                     <button className="smallbtn danger" onClick={() => s.deleteColumn(table.id, c.id)}>Delete column</button>
                   </div>

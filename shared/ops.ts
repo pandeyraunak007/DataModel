@@ -11,6 +11,7 @@ const ColumnSpec = z.object({
   autoIncrement: z.boolean().optional(),
   default: z.string().optional(),
   comment: z.string().optional(),
+  classification: z.enum(["pii", "sensitive", "none"]).optional(),
 });
 const RoleZ = z.enum(["fact", "dimension", "hub", "link", "satellite"]);
 const RefActionZ = z.enum(["NO ACTION", "CASCADE", "SET NULL", "RESTRICT"]);
@@ -49,6 +50,7 @@ const columnSchema = {
     autoIncrement: { type: "boolean" },
     default: { type: "string", description: "SQL default expression" },
     comment: { type: "string" },
+    classification: { type: "string", enum: ["pii", "sensitive", "none"], description: "Data classification; omit to let the app infer it from the column name" },
   },
 };
 

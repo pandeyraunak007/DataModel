@@ -1,6 +1,6 @@
 // Modeling intent: the context a modeler declares up front. It drives validation rules,
 // the copilot's behaviour, and how tables are classified on the canvas.
-import { DIALECTS, type DataModel, type ModelIntent, type Pattern, type Table, type TableRole } from "./types.ts";
+import { DIALECTS, type Column, type DataModel, type ModelIntent, type Pattern, type Table, type TableRole } from "./types.ts";
 
 export interface PatternField {
   key: string;
@@ -131,6 +131,17 @@ export function tableRole(t: Pick<Table, "name" | "role">): TableRole | undefine
   if (/^hub_/.test(n)) return "hub";
   if (/^(lnk|link)_/.test(n)) return "link";
   if (/^sat_/.test(n)) return "satellite";
+  return undefined;
+}
+
+const PII = /(^|_)(e?mail|first_?name|last_?name|full_?name|surname|phone|mobile|fax|street|address|addr|city|zip|postal|postcode|dob|birth|ssn|sin|nin|passport|national_?id|tax_?id|ip_?addr(ess)?|latitude|longitude|gender|license)/i;
+const SENSITIVE = /(password|passwd|pwd|secret|token|api_?key|private_?key|(^|_)salt($|_)|salary|income|credit_?card|card_?(no|num)|cvv|iban|account_?(no|num)|pin($|_))/i;
+
+/** A column's data classification: explicit if set, otherwise inferred from its name. */
+export function columnClass(c: Pick<Column, "name" | "classification">): "pii" | "sensitive" | undefined {
+  if (c.classification) return c.classification === "none" ? undefined : c.classification;
+  if (SENSITIVE.test(c.name)) return "sensitive";
+  if (PII.test(c.name)) return "pii";
   return undefined;
 }
 

@@ -17,6 +17,7 @@ interface RawTable {
   schema?: string;
   name: string;
   comment?: string | null;
+  rows?: number | null;
   columns: RawColumn[];
   pk: string[];
   uniques: { name: string; columns: string[] }[];
@@ -56,6 +57,7 @@ function build(raw: Raw, cfg: ConnectionConfig, name: string): DataModel {
       name: rt.name,
       schema: rt.schema,
       comment: rt.comment || undefined,
+      rowCount: rt.rows != null && Number(rt.rows) >= 0 ? Number(rt.rows) : undefined,
       columns: rt.columns.map((c) =>
         newColumn({
           name: c.name,
@@ -135,7 +137,7 @@ async function postgres(cfg: ConnectionConfig): Promise<Raw> {
     const columns = await client.query(
       `SELECT n.nspname AS schema, c.relname AS "table", a.attname AS "column", format_type(a.atttypid, a.atttypmod) AS type,
               a.attnotnull AS notnull, pg_get_expr(d.adbin, d.adrelid) AS "default", a.attidentity <> '' AS identity,
-              col_description(c.oid, a.attnum) AS comment, obj_description(c.oid) AS table_comment
+              col_description(c.oid, a.attnum) AS comment, obj_description(c.oid) AS table_comment, c.reltuples::bigint AS rows
        FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
        JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
        LEFT JOIN pg_attrdef d ON d.adrelid = c.oid AND d.adnum = a.attnum
@@ -171,6 +173,7 @@ async function postgres(cfg: ConnectionConfig): Promise<Raw> {
         schema: rows[0].schema,
         name: rows[0].table,
         comment: rows[0].table_comment,
+        rows: rows[0].rows,
         columns: rows.map((r) => {
           const serial = typeof r.default === "string" && r.default.startsWith("nextval(");
           // Show the short type names people write, and drop the cast Postgres appends to literal defaults.
@@ -219,7 +222,7 @@ async function mysql(cfg: ConnectionConfig): Promise<Raw> {
     const rows = async (sql: string) => (await conn.query(sql, [db]))[0] as Record<string, any>[];
     const columns = await rows(
       `SELECT c.TABLE_NAME AS t, c.COLUMN_NAME AS c, c.COLUMN_TYPE AS type, c.IS_NULLABLE AS nullable, c.COLUMN_DEFAULT AS def,
-              c.EXTRA AS extra, c.COLUMN_COMMENT AS comment, t.TABLE_COMMENT AS table_comment
+              c.EXTRA AS extra, c.COLUMN_COMMENT AS comment, t.TABLE_COMMENT AS table_comment, t.TABLE_ROWS AS table_rows
        FROM information_schema.COLUMNS c JOIN information_schema.TABLES t ON t.TABLE_SCHEMA = c.TABLE_SCHEMA AND t.TABLE_NAME = c.TABLE_NAME
        WHERE c.TABLE_SCHEMA = ? AND t.TABLE_TYPE = 'BASE TABLE' ORDER BY c.TABLE_NAME, c.ORDINAL_POSITION`,
     );
@@ -240,6 +243,7 @@ async function mysql(cfg: ConnectionConfig): Promise<Raw> {
       return {
         name,
         comment: cols[0].table_comment,
+        rows: cols[0].table_rows,
         columns: cols.map((r) => {
           const generated = /DEFAULT_GENERATED/i.test(r.extra ?? "");
           const def = r.def == null ? null : generated || /^-?\d+(\.\d+)?$/.test(r.def) || /^current_timestamp/i.test(r.def) ? String(r.def) : `'${String(r.def).replace(/'/g, "''")}'`;
@@ -277,7 +281,8 @@ async function sqlserver(cfg: ConnectionConfig): Promise<Raw> {
     const where = `(@schema IS NULL OR s.name = @schema)`;
     const columns = await run(
       `SELECT s.name AS [schema], t.name AS [table], c.name AS [column], ty.name AS type, c.max_length, c.precision, c.scale,
-              c.is_nullable, c.is_identity, dc.definition AS def
+              c.is_nullable, c.is_identity, dc.definition AS def,
+              (SELECT SUM(p.rows) FROM sys.partitions p WHERE p.object_id = t.object_id AND p.index_id IN (0, 1)) AS table_rows
        FROM sys.tables t JOIN sys.schemas s ON s.schema_id = t.schema_id JOIN sys.columns c ON c.object_id = t.object_id
        JOIN sys.types ty ON ty.user_type_id = c.user_type_id LEFT JOIN sys.default_constraints dc ON dc.object_id = c.default_object_id
        WHERE t.is_ms_shipped = 0 AND ${where} ORDER BY s.name, t.name, c.column_id`,
@@ -314,6 +319,7 @@ async function sqlserver(cfg: ConnectionConfig): Promise<Raw> {
       return {
         schema: cols[0].schema,
         name: cols[0].table,
+        rows: cols[0].table_rows,
         columns: cols.map((r) => ({ name: r.column, type: typeOf(r), nullable: !!r.is_nullable, default: r.def ? String(r.def).replace(/^\((.*)\)$/, "$1") : null, autoIncrement: !!r.is_identity })),
         pk: ix.find((i) => i.pk)?.columns ?? [],
         uniques: ix.filter((i) => i.uc),
@@ -351,6 +357,7 @@ function sqlite(cfg: ConnectionConfig): Raw {
       }));
       tables.push({
         name: t.name,
+        rows: Number(all(`SELECT COUNT(*) AS n FROM ${qi(t.name)}`)[0].n),
         columns: info.map((c) => ({
           name: c.name, type: (c.type || "text").toLowerCase(), nullable: !c.notnull, default: c.dflt_value,
           autoIncrement: autoinc && pk.length === 1 && pk[0] === c.name,

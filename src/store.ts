@@ -19,7 +19,9 @@ export interface ChatMessage {
   proposal?: "pending" | "applied" | "discarded" | "superseded";
 }
 
-export const NODE_WIDTH = 250;
+export const NODE_WIDTH = 290;
+export const ROW_H = 28;
+export const HEAD_H = 54;
 /** Wide tables show their key columns plus enough others to reach this many rows. */
 export const MAX_NODE_COLUMNS = 12;
 export const relationColumns = (m: DataModel) => new Set(m.relationships.flatMap((r) => [...r.fromColumns, ...r.toColumns]));
@@ -31,7 +33,7 @@ export function visibleColumns(t: Table, relCols: Set<string>): Column[] {
 }
 export const nodeHeight = (t: Table, relCols: Set<string>) => {
   const shown = visibleColumns(t, relCols).length;
-  return 36 + Math.max(1, shown) * 26 + (shown < t.columns.length ? 26 : 0) + 6;
+  return HEAD_H + Math.max(1, shown) * ROW_H + (shown < t.columns.length ? ROW_H : 0) + (t.indexes.length ? 30 : 0) + 5;
 };
 
 export function layoutModel(m: DataModel): DataModel {

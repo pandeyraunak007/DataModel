@@ -21,6 +21,8 @@ export interface Column {
   autoIncrement: boolean;
   default?: string;
   comment?: string;
+  /** Data classification. Unset means "infer from the column name"; "none" turns the inferred tag off. */
+  classification?: "pii" | "sensitive" | "none";
 }
 
 export interface Index {
@@ -41,6 +43,8 @@ export interface Table {
   subjectArea?: string;
   /** Explicit classification; when unset it is inferred from the name (FACT_, DIM_, HUB_...). */
   role?: TableRole;
+  /** Approximate row count, captured when the table was reverse engineered. */
+  rowCount?: number;
   comment?: string;
   columns: Column[];
   indexes: Index[];
