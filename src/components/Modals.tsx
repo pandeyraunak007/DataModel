@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { generateDDL } from "../../shared/ddl.ts";
 import { describeDiff, diffModels, generateMigration } from "../../shared/diff.ts";
-import { DIALECTS, uid, type ConnectionConfig, type DataModel, type Dialect, type ModelSummary, type VersionInfo } from "../../shared/types.ts";
+import { DIALECTS, type ConnectionConfig, type DataModel, type Dialect, type VersionInfo } from "../../shared/types.ts";
 import { api, download } from "../api.ts";
 import { useStore } from "../store.ts";
 
@@ -43,70 +43,6 @@ const DialectSelect = ({ value, onChange, exclude }: { value: string; onChange: 
     {DIALECTS.filter((d) => !exclude?.includes(d.id)).map((d) => <option key={d.id} value={d.id}>{d.label}</option>)}
   </select>
 );
-
-// ------------------------------------------------------------------ Models
-
-export function ModelsModal() {
-  const s = useStore.getState();
-  const [models, setModels] = useState<ModelSummary[] | null>(null);
-  const [name, setName] = useState("");
-  const [dialect, setDialect] = useState<Dialect>("postgres");
-  const refresh = () => api.listModels().then(setModels);
-  useEffect(() => void refresh(), []);
-
-  const open = async (id: string) => {
-    s.load(await api.getModel(id));
-    s.openModal(null);
-  };
-  const importFile = async (file: File) => {
-    try {
-      const m = JSON.parse(await file.text()) as DataModel;
-      if (!Array.isArray(m.tables) || !Array.isArray(m.relationships)) throw new Error("not a DataModel Studio file");
-      s.load({ ...m, id: uid("m_") }, { dirty: true });
-      s.openModal(null);
-    } catch (e) {
-      s.notify("Import failed: " + (e as Error).message);
-    }
-  };
-
-  return (
-    <Shell title="Models">
-      <h3>New model</h3>
-      <div className="form-row">
-        <input className="input" placeholder="Model name" value={name} onChange={(e) => setName(e.target.value)} />
-        <DialectSelect value={dialect} onChange={setDialect} />
-        <button className="btn primary" onClick={() => (s.newModel(name.trim() || "Untitled model", dialect), s.openModal(null))}>Create</button>
-      </div>
-      <div className="form-row">
-        <label className="btn">
-          Import JSON…
-          <input type="file" accept=".json,application/json" hidden onChange={(e) => e.target.files?.[0] && importFile(e.target.files[0])} />
-        </label>
-        <button className="btn" onClick={() => download(`${useStore.getState().model.name}.model.json`, JSON.stringify(useStore.getState().model, null, 2), "application/json")}>
-          Export current model as JSON
-        </button>
-      </div>
-      <h3>Saved models</h3>
-      {models?.length === 0 && <p className="muted">Nothing saved yet. Models are stored as JSON files in the app's data/models folder.</p>}
-      <div className="list">
-        {models?.map((m) => (
-          <div className="list-row" key={m.id}>
-            <div>
-              <strong>{m.name}</strong>
-              <div className="muted small-text">
-                {DIALECTS.find((d) => d.id === m.dialect)?.label} · {m.tableCount} tables · {m.latestVersion ? `v${m.latestVersion}` : "no versions"} · {new Date(m.updatedAt).toLocaleString()}
-              </div>
-            </div>
-            <div>
-              <button className="btn small" onClick={() => open(m.id)}>Open</button>
-              <button className="btn small ghost danger" onClick={() => confirm(`Delete "${m.name}" and all its versions?`) && api.deleteModel(m.id).then(refresh)}>Delete</button>
-            </div>
-          </div>
-        ))}
-      </div>
-    </Shell>
-  );
-}
 
 // ------------------------------------------------------------------ Reverse engineering
 
@@ -191,8 +127,8 @@ export function ReverseModal() {
         <>
           <p className="muted">
             {tab === "sql"
-              ? "Paste CREATE TABLE statements from any database. The assistant reads the script and builds the tables, keys and relationships in the open model."
-              : "Describe the system in plain language. The assistant designs the tables, keys and relationships in the open model."}
+              ? "Paste CREATE TABLE statements from any database. The copilot reads the script and builds the tables, keys and relationships in the open model."
+              : "Describe the system in plain language. The copilot designs the tables, keys and relationships in the open model."}
           </p>
           <textarea
             className="input mono"
@@ -211,7 +147,7 @@ export function ReverseModal() {
                 else s.askAI(`Design a complete data model for the following and build it in this model:\n\n${text}`);
               }}
             >
-              Build with the assistant
+              Build with the copilot
             </button>
           </div>
         </>
@@ -237,7 +173,7 @@ export function ForwardModal() {
         <label className="check"><input type="checkbox" checked={createSchemas} onChange={(e) => setSchemas(e.target.checked)} /> CREATE SCHEMA</label>
         <span className="spacer" />
         <button className="btn" onClick={() => (openModal(null), askAI(`Review this generated ${dialect} DDL before I run it. Point out anything that would fail or behave unexpectedly on ${dialect}.`, ddl))}>
-          Review with assistant
+          Review with copilot
         </button>
       </div>
       {dialect !== model.dialect && <p className="muted small-text">Column types are translated from {model.dialect} to {dialect}. Types with no known equivalent are passed through unchanged.</p>}
@@ -320,7 +256,7 @@ export function CompareModal() {
                 disabled={!diff.changeCount}
                 onClick={() => (openModal(null), askAI("Assess this migration. Which statements can lose data, fail on existing rows, or lock large tables? Suggest a safer order or extra steps where needed.", `Differences (base → target):\n${describeDiff(diff)}\n\nGenerated ${dialect} migration script:\n${script}`))}
               >
-                Assess with assistant
+                Assess with copilot
               </button>
             </div>
             <CodeBlock code={script} filename={`migration_${dialect}.sql`} />
@@ -359,6 +295,9 @@ export function VersionsModal() {
         <button className="btn primary" onClick={commit}>Save version {versions.length ? versions[0].version + 1 : 1}</button>
       </div>
       {dirty && <p className="muted small-text">The open model has unsaved changes; saving a version also saves the model.</p>}
+      <div className="form-row">
+        <button className="btn" onClick={() => download(`${model.name}.model.json`, JSON.stringify(useStore.getState().model, null, 2), "application/json")}>Export working copy as JSON</button>
+      </div>
       <div className="list">
         {versions.map((v) => (
           <div className="list-row" key={v.version}>
@@ -381,45 +320,94 @@ export function VersionsModal() {
 
 // ------------------------------------------------------------------ Settings
 
-const AI_MODELS = [
-  ["claude-opus-5-5", "Claude Opus 5.5 (recommended)"],
-  ["claude-sonnet-5-5", "Claude Sonnet 5.5 (faster, cheaper)"],
-  ["claude-haiku-5-5", "Claude Haiku 5.5 (fastest)"],
-  ["claude-fable-5-2", "Claude Fable 5.2 (most capable)"],
-];
-
 export function SettingsModal() {
   const settings = useStore((s) => s.settings);
   const { notify, openModal } = useStore.getState();
+  const [providerId, setProviderId] = useState(settings?.provider ?? "anthropic");
+  const p = settings?.providers.find((x) => x.id === providerId);
   const [apiKey, setApiKey] = useState("");
-  const [aiModel, setAiModel] = useState(settings?.aiModel ?? "claude-opus-5-5");
-  const save = async (extra: { clearApiKey?: boolean } = {}) => {
-    useStore.setState({ settings: await api.saveSettings({ apiKey: apiKey || undefined, aiModel, ...extra }) });
+  const [model, setModel] = useState(p?.model ?? "");
+  const [baseUrl, setBaseUrl] = useState(p?.baseUrl ?? "");
+  const [models, setModels] = useState<string[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  // Each provider keeps its own key, model and URL; show that provider's values when switching.
+  useEffect(() => {
     setApiKey("");
-    notify("Settings saved");
-    if (!extra.clearApiKey) openModal(null);
+    setModels([]);
+    setError("");
+    setModel(p?.model ?? "");
+    setBaseUrl(p?.baseUrl ?? "");
+  }, [providerId]);
+
+  if (!settings || !p) return <Shell title="Settings"><p className="muted">The app server is not reachable.</p></Shell>;
+  const custom = p.id === "custom";
+
+  const save = async (extra: { clearApiKey?: boolean } = {}) => {
+    const next = await api.saveSettings({ provider: providerId, apiKey: apiKey || undefined, model, ...(custom ? { baseUrl } : {}), ...extra });
+    useStore.setState({ settings: next });
+    setApiKey("");
+    return next;
   };
+  const loadModels = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      await save();
+      const list = await api.listProviderModels(providerId);
+      setModels(list);
+      notify(list.length ? `${list.length} models available — pick one from the list` : "The provider returned no models");
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <Shell title="Settings">
-      <h3>AI assistant</h3>
+      <h3>Modeling Copilot</h3>
       <label className="field">
-        <span>Anthropic API key</span>
-        <input className="input mono" type="password" autoComplete="off" placeholder={settings?.hasApiKey ? `Key set (${settings.keyHint}) — enter a new one to replace it` : "sk-ant-…"} value={apiKey} onChange={(e) => setApiKey(e.target.value)} />
+        <span>AI provider</span>
+        <select className="input" value={providerId} onChange={(e) => setProviderId(e.target.value)}>
+          {settings.providers.map((x) => <option key={x.id} value={x.id}>{x.label}{x.ready ? " — configured" : ""}</option>)}
+        </select>
+      </label>
+      {custom && (
+        <label className="field">
+          <span>Base URL</span>
+          <input className="input mono" placeholder="http://localhost:11434/v1" value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} />
+        </label>
+      )}
+      <label className="field">
+        <span>API key{custom ? " (optional)" : ""}</span>
+        <input className="input mono" type="password" autoComplete="off" placeholder={p.hasKey ? `Key set (${p.keyHint}) — enter a new one to replace it` : "Paste your key"} value={apiKey} onChange={(e) => setApiKey(e.target.value)} />
       </label>
       <p className="muted small-text">
-        {settings?.keySource === "env"
-          ? "Currently using the ANTHROPIC_API_KEY environment variable of the app server."
-          : "The key is stored in data/settings.json on this machine (readable only by you) and is sent only to the Anthropic API. It is never returned to the browser."}
+        {p.keyHelp}.{" "}
+        {p.keySource === "env"
+          ? `Currently using the ${p.env} environment variable of the app server.`
+          : "Keys are stored in data/settings.json on this machine, sent only to the provider you select, and never returned to the browser."}
       </p>
       <label className="field">
         <span>Model</span>
-        <select className="input" value={aiModel} onChange={(e) => setAiModel(e.target.value)}>
-          {AI_MODELS.map(([id, label]) => <option key={id} value={id}>{label}</option>)}
-        </select>
+        <div className="form-row">
+          <input className="input mono" list="provider-models" placeholder={p.defaultModel || "model id"} value={model} onChange={(e) => setModel(e.target.value)} />
+          <datalist id="provider-models">{[...new Set([p.defaultModel, ...models].filter(Boolean))].map((m) => <option key={m} value={m} />)}</datalist>
+          <button className="btn" disabled={busy} onClick={loadModels}>{busy ? "Loading…" : "Load available models"}</button>
+        </div>
       </label>
+      {models.length > 0 && (
+        <div className="chips">
+          {models.slice(0, 40).map((m) => <button key={m} className={"chip" + (m === model ? " on" : "")} onClick={() => setModel(m)}>{m}</button>)}
+        </div>
+      )}
+      <p className="muted small-text">The copilot edits the model through tool calls, so pick a model that supports function calling. Larger models follow the modeling context more reliably.</p>
+      {error && <p className="error">{error}</p>}
       <div className="form-row">
-        <button className="btn primary" onClick={() => save()}>Save</button>
-        {settings?.keySource === "settings" && <button className="btn ghost danger" onClick={() => save({ clearApiKey: true })}>Remove stored key</button>}
+        <button className="btn primary" onClick={async () => { const next = await save(); notify(`Copilot now uses ${next.providerLabel}`); openModal(null); }}>Save and use {p.label}</button>
+        {p.keySource === "settings" && <button className="btn ghost danger" onClick={() => save({ clearApiKey: true }).then(() => notify("Stored key removed"))}>Remove stored key</button>}
       </div>
     </Shell>
   );

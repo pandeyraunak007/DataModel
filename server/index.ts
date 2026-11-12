@@ -3,8 +3,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { DataModel } from "../shared/types.ts";
-import { chat } from "./ai.ts";
+import { chat, listModels } from "./ai.ts";
 import { ensureSampleDb, introspect, SAMPLE_DB } from "./introspect.ts";
+import { provider, PROVIDERS } from "./providers.ts";
 import * as store from "./store.ts";
 
 const app = express();
@@ -56,18 +57,42 @@ app.post("/api/db/introspect", wrap(async (req, res) => {
 
 // ---- settings ----
 const settingsView = () => {
-  const { key, source } = store.resolveApiKey();
-  return { hasApiKey: !!key, keySource: source, keyHint: key ? "…" + key.slice(-4) : "", aiModel: store.readSettings().aiModel || store.DEFAULT_AI_MODEL };
+  const active = store.resolveProvider();
+  const ready = (r: ReturnType<typeof store.resolveProvider>) => (r.info.id === "custom" ? !!r.baseUrl : !!r.key);
+  return {
+    provider: active.info.id,
+    providerLabel: active.info.label,
+    hasApiKey: ready(active),
+    providers: PROVIDERS.map((p) => {
+      const r = store.resolveProvider(p.id);
+      return {
+        id: p.id, label: p.label, keyHelp: p.keyHelp, env: p.env, defaultModel: p.defaultModel,
+        hasKey: !!r.key, ready: ready(r), keySource: r.keySource, keyHint: r.key ? "…" + r.key.slice(-4) : "", model: r.model, baseUrl: r.baseUrl,
+      };
+    }),
+  };
 };
 app.get("/api/settings", wrap((_req, res) => res.json(settingsView())));
 app.put("/api/settings", wrap((req, res) => {
-  const { apiKey, aiModel, clearApiKey } = req.body as { apiKey?: string; aiModel?: string; clearApiKey?: boolean };
-  const patch: store.Settings = {};
-  if (typeof apiKey === "string" && apiKey.trim()) patch.apiKey = apiKey.trim();
-  if (clearApiKey) patch.apiKey = "";
-  if (typeof aiModel === "string" && aiModel.trim()) patch.aiModel = aiModel.trim();
-  store.writeSettings(patch);
+  const b = req.body as { provider?: string; apiKey?: string; model?: string; baseUrl?: string; clearApiKey?: boolean };
+  const s = store.readSettings();
+  const id = provider(b.provider ?? s.provider).id;
+  s.provider = id;
+  s.keys = { ...s.keys };
+  s.models = { ...s.models };
+  if (typeof b.apiKey === "string" && b.apiKey.trim()) s.keys[id] = b.apiKey.trim();
+  if (b.clearApiKey) delete s.keys[id];
+  if (typeof b.model === "string") b.model.trim() ? (s.models[id] = b.model.trim()) : delete s.models[id];
+  if (id === "custom" && typeof b.baseUrl === "string") s.baseUrl = b.baseUrl.trim();
+  store.writeSettings(s);
   res.json(settingsView());
+}));
+app.get("/api/settings/models", wrap(async (req, res) => {
+  try {
+    res.json(await listModels(String(req.query.provider || "")));
+  } catch (e) {
+    res.status(400).json({ error: (e as Error).message });
+  }
 }));
 
 // ---- AI ----

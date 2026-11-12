@@ -31,10 +31,16 @@ export interface Index {
   unique: boolean;
 }
 
+export type TableRole = "fact" | "dimension" | "hub" | "link" | "satellite";
+
 export interface Table {
   id: string;
   name: string;
   schema?: string;
+  /** Grouping shown in the Model Explorer and used for per-area diagrams. */
+  subjectArea?: string;
+  /** Explicit classification; when unset it is inferred from the name (FACT_, DIM_, HUB_...). */
+  role?: TableRole;
   comment?: string;
   columns: Column[];
   indexes: Index[];
@@ -55,12 +61,29 @@ export interface Relationship {
   onUpdate?: RefAction;
 }
 
+export type Pattern = "STAR_SCHEMA" | "SNOWFLAKE_SCHEMA" | "THIRD_NORMAL_FORM" | "DATA_VAULT_2" | "CANONICAL" | "CUSTOM";
+
+/** The modeling context declared in guided setup. */
+export interface ModelIntent {
+  pattern: Pattern;
+  domain: string;
+  purpose: string;
+  modelType: string;
+  project: string;
+  /** Pattern-specific answers (grain, history strategy, ...) keyed by field key. */
+  details: Record<string, string>;
+  naming: string;
+  pkStrategy: string;
+  guardrails: { patternRules: boolean; denorm: boolean; platformRules: boolean; approval: boolean };
+}
+
 export interface DataModel {
   formatVersion: 1;
   id: string;
   name: string;
   description?: string;
   dialect: Dialect;
+  intent?: ModelIntent;
   tables: Table[];
   relationships: Relationship[];
   createdAt: string;
@@ -71,6 +94,7 @@ export interface ModelSummary {
   id: string;
   name: string;
   dialect: Dialect;
+  subtitle: string;
   tableCount: number;
   updatedAt: string;
   latestVersion: number;

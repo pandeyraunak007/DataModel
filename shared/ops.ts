@@ -12,10 +12,12 @@ const ColumnSpec = z.object({
   default: z.string().optional(),
   comment: z.string().optional(),
 });
+const RoleZ = z.enum(["fact", "dimension", "hub", "link", "satellite"]);
 const RefActionZ = z.enum(["NO ACTION", "CASCADE", "SET NULL", "RESTRICT"]);
 
 export const Operation = z.discriminatedUnion("op", [
-  z.object({ op: z.literal("add_table"), table: z.string().min(1), schema: z.string().optional(), comment: z.string().optional(), columns: z.array(ColumnSpec) }),
+  z.object({ op: z.literal("add_table"), table: z.string().min(1), schema: z.string().optional(), comment: z.string().optional(), subjectArea: z.string().optional(), role: RoleZ.optional(), columns: z.array(ColumnSpec) }),
+  z.object({ op: z.literal("update_table"), table: z.string(), subjectArea: z.string().optional(), role: RoleZ.optional(), comment: z.string().optional(), schema: z.string().optional() }),
   z.object({ op: z.literal("drop_table"), table: z.string() }),
   z.object({ op: z.literal("rename_table"), table: z.string(), newName: z.string().min(1) }),
   z.object({ op: z.literal("set_table_comment"), table: z.string(), comment: z.string() }),
@@ -63,13 +65,15 @@ export const operationsJsonSchema = {
           op: {
             type: "string",
             enum: [
-              "add_table", "drop_table", "rename_table", "set_table_comment", "add_column", "alter_column", "drop_column",
+              "add_table", "update_table", "drop_table", "rename_table", "set_table_comment", "add_column", "alter_column", "drop_column",
               "add_relationship", "drop_relationship", "add_index", "drop_index", "set_model_info",
             ],
           },
           table: { type: "string", description: "Table name (all table/column/index ops)" },
           schema: { type: "string", description: "add_table: optional schema name" },
-          comment: { type: "string", description: "add_table, set_table_comment" },
+          comment: { type: "string", description: "add_table, update_table, set_table_comment" },
+          subjectArea: { type: "string", description: "add_table, update_table: subject area the table belongs to, e.g. Sales, Customer, Shared Dimensions" },
+          role: { type: "string", enum: ["fact", "dimension", "hub", "link", "satellite"], description: "add_table, update_table: classification under the model's methodology, when one applies" },
           columns: {
             description: "add_table: array of column objects {name,type,nullable,primaryKey,unique,autoIncrement,default,comment}. add_index: array of column names.",
             type: "array",
@@ -97,6 +101,39 @@ export const operationsJsonSchema = {
   },
   required: ["operations"],
 };
+
+/**
+ * The same tool input for providers whose function-calling schema has no `anyOf`
+ * (Gemini, some Groq models): each property has exactly one type. `columnName` and
+ * `columnNames` stand in for the string forms of `column` / `columns`.
+ */
+export const compatOperationsJsonSchema = (() => {
+  const base = structuredClone(operationsJsonSchema) as any;
+  const props = base.properties.operations.items.properties;
+  props.columns = { type: "array", description: "add_table only: the table's columns", items: { ...columnSchema, required: ["name", "type"] } };
+  props.column = { ...columnSchema, description: "add_column only: the new column" };
+  props.columnName = { type: "string", description: "alter_column / drop_column: name of the existing column" };
+  props.columnNames = { type: "array", items: { type: "string" }, description: "add_index: names of the indexed columns, in order" };
+  return base as typeof operationsJsonSchema;
+})();
+
+/** Map the compat field names back onto the canonical operation shape. */
+export function normalizeCompatInput(input: unknown): unknown {
+  if (!input || typeof input !== "object" || !Array.isArray((input as any).operations)) return input;
+  return {
+    operations: (input as any).operations.map((raw: any) => {
+      if (!raw || typeof raw !== "object") return raw;
+      const { columnName, columnNames, ...op } = raw;
+      // Models often send empty placeholders for fields that do not apply.
+      for (const k of Object.keys(op)) if (op[k] === null || op[k] === "" || (Array.isArray(op[k]) && !op[k].length && k !== "columns")) delete op[k];
+      if ((op.op === "alter_column" || op.op === "drop_column") && typeof op.column !== "string") op.column = columnName ?? op.column?.name;
+      if (op.op === "add_index" && columnNames?.length) op.columns = columnNames;
+      if (op.op === "add_index" && Array.isArray(op.columns)) op.columns = op.columns.map((c: any) => (typeof c === "string" ? c : c?.name));
+      if (op.op !== "add_table" && op.op !== "add_index") delete op.columns;
+      return op;
+    }),
+  };
+}
 
 export interface OpResult {
   ok: boolean;
@@ -132,11 +169,20 @@ export function applyOperations(input: DataModel, ops: Operation[]): { model: Da
             name: op.table,
             schema: op.schema,
             comment: op.comment,
+            subjectArea: op.subjectArea,
+            role: op.role,
             columns: op.columns.map((c) => newColumn(clean({ ...c, nullable: c.nullable ?? !c.primaryKey }))),
             indexes: [],
             position: { x: 60 + (n % 4) * 340, y: n < 4 ? 60 : maxY + 60 + Math.floor(n / 4) * 20 },
           });
           message = `Added table ${op.table} (${op.columns.length} columns)`;
+          break;
+        }
+        case "update_table": {
+          const t = findT(op.table);
+          const { op: _o, table: _t, ...patch } = op;
+          Object.assign(t, clean(patch));
+          message = `Updated table ${t.name}`;
           break;
         }
         case "drop_table": {
@@ -240,7 +286,8 @@ export function describeModel(m: DataModel): string {
   const lines = [`Model "${m.name}" — dialect ${m.dialect}, ${m.tables.length} tables, ${m.relationships.length} foreign keys`];
   if (m.description) lines.push(`Description: ${m.description}`);
   for (const t of m.tables) {
-    lines.push("", `TABLE ${t.schema ? t.schema + "." : ""}${t.name}${t.comment ? `  -- ${t.comment}` : ""}`);
+    const tags = [t.role && `role: ${t.role}`, t.subjectArea && `subject area: ${t.subjectArea}`].filter(Boolean).join(", ");
+    lines.push("", `TABLE ${t.schema ? t.schema + "." : ""}${t.name}${tags ? `  [${tags}]` : ""}${t.comment ? `  -- ${t.comment}` : ""}`);
     for (const c of t.columns) {
       const flags = [c.primaryKey && "PK", !c.nullable && !c.primaryKey && "NOT NULL", c.unique && "UNIQUE", c.autoIncrement && "AUTOINC", c.default && `DEFAULT ${c.default}`]
         .filter(Boolean).join(" ");

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import { pattern } from "../../shared/intent.ts";
 import { useStore } from "../store.ts";
 
 function inline(text: string): ReactNode[] {
@@ -10,8 +11,7 @@ function inline(text: string): ReactNode[] {
 /** Small markdown subset: fenced code, headings, bullet/numbered lists, bold, inline code. */
 function Markdown({ text }: { text: string }) {
   const out: ReactNode[] = [];
-  const parts = text.split(/```/);
-  parts.forEach((part, i) => {
+  text.split(/```/).forEach((part, i) => {
     if (i % 2) {
       out.push(<pre key={i}><code>{part.replace(/^[a-z]*\n/, "")}</code></pre>);
       return;
@@ -34,90 +34,91 @@ function Markdown({ text }: { text: string }) {
   return <>{out}</>;
 }
 
-const STARTERS = [
-  { label: "Design a model from a description", prompt: "", fill: "Design a data model for " },
-  { label: "Review this model", prompt: "Review this model for design problems: missing keys, wrong types, missing foreign keys or indexes, naming inconsistencies, normalization issues. List findings by severity; do not change anything yet." },
-  { label: "Suggest indexes", prompt: "Suggest the indexes this model needs (foreign key columns and likely lookup columns). List them with one-line reasons, then ask whether to add them." },
-  { label: "Explain this model", prompt: "Explain what this model represents, table by table, and how the tables relate." },
-  { label: "Write sample queries", prompt: "Write five useful example SQL queries against this model, in its dialect, each with a one-line description." },
-];
+const PROMPTS: Record<string, string> = {
+  "Review fact grain": "Review every fact table against the declared grain. Is each measure valid at that grain, and can any join duplicate rows? List review candidates; do not change anything yet.",
+  "Check SCD strategy": "Check the dimensions against the declared history strategy. Which dimensions need history columns, and are current-row and surrogate-key handling in place? Do not change anything yet.",
+  "Find design issues": "Find design issues in this model under its declared methodology and guardrails. List them by severity as review candidates; do not change anything yet.",
+};
 
-export default function Assistant() {
+export default function Copilot() {
   const chat = useStore((s) => s.chat);
   const busy = useStore((s) => s.chatBusy);
   const settings = useStore((s) => s.settings);
-  const { askAI, stopAI, clearChat, toggleAssistant, openModal } = useStore.getState();
+  const intent = useStore((s) => s.model.intent);
+  const empty = useStore((s) => s.model.tables.length === 0);
+  const selected = useStore((s) => s.model.tables.find((t) => t.id === s.selectedTableId)?.name);
+  const { askAI, stopAI, clearChat, openModal, applyProposal, discardProposal } = useStore.getState();
   const [draft, setDraft] = useState("");
   const scroller = useRef<HTMLDivElement>(null);
-  const input = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
     scroller.current?.scrollTo({ top: scroller.current.scrollHeight });
   }, [chat]);
 
-  const send = () => {
-    if (!draft.trim() || busy) return;
-    askAI(draft.trim());
+  const send = (text = draft) => {
+    if (!text.trim() || busy) return;
+    askAI(PROMPTS[text] ?? text.trim());
     setDraft("");
   };
+  const p = intent && pattern(intent.pattern);
+  const suggestions = empty ? ["Draft a starter model from my context"] : p?.suggestions ?? ["Review this model", "Suggest indexes", "Explain this model"];
+  const hasKey = settings?.hasApiKey;
 
   return (
-    <aside className="assistant">
-      <div className="side-head">
-        <h2>Assistant</h2>
-        <div>
-          {chat.length > 0 && <button className="btn ghost small" onClick={clearChat} disabled={busy}>New chat</button>}
-          <button className="icon-btn" title="Hide assistant" onClick={() => toggleAssistant(false)}>×</button>
-        </div>
+    <div className="copilot">
+      <div className="copilot-head">
+        <span>✧ Modeling Copilot</span>
+        <span className="copilot-meta">
+          {hasKey === false ? "No API key" : `${settings?.providerLabel.split(" (")[0]} · ${intent ? "intent connected" : "no context set"}`}
+          {chat.length > 0 && <button className="linkbtn" onClick={clearChat} disabled={busy}>New chat</button>}
+        </span>
       </div>
-
-      {settings && !settings.hasApiKey && (
-        <div className="notice">
-          Add your Anthropic API key to turn the assistant on.
-          <button className="btn small" onClick={() => openModal("settings")}>Open settings</button>
-        </div>
-      )}
-
-      <div className="chat" ref={scroller}>
+      <div className="messages" ref={scroller}>
+        {hasKey === false && (
+          <div className="msg warn">
+            Add an API key for your AI provider to turn the copilot on. <button className="linkbtn" onClick={() => openModal("settings")}>Open settings</button>
+          </div>
+        )}
         {!chat.length && (
-          <div className="starters">
-            <p className="muted">Ask for anything in plain language. The assistant sees the open model and can edit it for you; every change it makes can be undone.</p>
-            {STARTERS.map((s) => (
-              <button
-                key={s.label}
-                className="starter"
-                onClick={() => {
-                  if (s.fill) {
-                    setDraft(s.fill);
-                    input.current?.focus();
-                  } else askAI(s.prompt);
-                }}
-              >
-                {s.label}
-              </button>
-            ))}
+          <div className="msg bot">
+            {intent && p
+              ? `I understand this is a ${intent.domain} ${p.name} for ${intent.purpose}. I'll tailor guidance to your declared context${intent.guardrails.approval ? ", and any change I propose waits for your approval" : ""}.`
+              : "Ask about this model or describe a change. Set up the modeling context so I can judge the design by your methodology."}
           </div>
         )}
         {chat.map((m) => (
-          <div key={m.id} className={"msg " + m.role}>
-            {m.role === "user" ? <p>{m.text}</p> : <Markdown text={m.text} />}
-            {m.ops && (
-              <ul className="ops">
-                {m.ops.map((o, i) => <li key={i} className={o.ok ? "ok" : "fail"}>{o.message}</li>)}
-              </ul>
+          <div key={m.id} className={"msg " + (m.role === "user" ? "user" : "bot")}>
+            {m.role === "user" ? m.text : <Markdown text={m.text} />}
+            {m.ops && <ul className="ops">{m.ops.map((o, i) => <li key={i} className={o.ok ? "ok" : "fail"}>{o.message}</li>)}</ul>}
+            {m.proposal === "pending" && (
+              <div className="proposal">
+                <span>Proposed changes — not applied yet</span>
+                <button className="smallbtn primary" onClick={applyProposal} disabled={busy}>Apply changes</button>
+                <button className="smallbtn" onClick={discardProposal} disabled={busy}>Discard</button>
+              </div>
+            )}
+            {m.proposal && m.proposal !== "pending" && (
+              <div className={"proposal done " + m.proposal}>
+                {m.proposal === "applied" ? "✓ Applied to the model" : m.proposal === "discarded" ? "Discarded" : "Included in the later proposal"}
+              </div>
             )}
             {m.status && <p className="status">{m.status}</p>}
             {m.error && <p className="error">{m.error}</p>}
           </div>
         ))}
+        {!busy && (
+          <div className="suggest">
+            {suggestions.map((x) => (
+              <button key={x} onClick={() => send(x === "Draft a starter model from my context" ? "Draft a starter model that fits the declared modeling context: the core tables, keys and relationships for this domain and workload, organised into subject areas." : x)}>{x}</button>
+            ))}
+          </div>
+        )}
       </div>
-
-      <div className="composer">
+      {selected && <div className="chat-context">Context: <b>{selected}</b> is selected</div>}
+      <div className="chatinput">
         <textarea
-          ref={input}
-          className="input"
-          rows={3}
-          placeholder="Ask, or describe a change to the model…"
+          rows={1}
+          placeholder="Ask about this model, or describe a change…"
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={(e) => {
@@ -127,8 +128,8 @@ export default function Assistant() {
             }
           }}
         />
-        {busy ? <button className="btn" onClick={stopAI}>Stop</button> : <button className="btn primary" onClick={send} disabled={!draft.trim()}>Send</button>}
+        {busy ? <button onClick={stopAI} title="Stop">■</button> : <button onClick={() => send()} disabled={!draft.trim()} title="Send">↑</button>}
       </div>
-    </aside>
+    </div>
   );
 }

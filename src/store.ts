@@ -1,10 +1,12 @@
 import dagre from "@dagrejs/dagre";
 import { create } from "zustand";
 import type { OpResult } from "../shared/ops.ts";
-import { emptyModel, newColumn, uid, type Column, type DataModel, type Dialect, type Relationship, type Table } from "../shared/types.ts";
+import { emptyModel, newColumn, uid, type Column, type DataModel, type Relationship, type Table } from "../shared/types.ts";
 import { api, streamChat, type SettingsView } from "./api.ts";
 
-export type Modal = null | "models" | "reverse" | "forward" | "compare" | "versions" | "settings";
+export type Page = "landing" | "setup" | "workspace";
+export type Modal = null | "reverse" | "forward" | "compare" | "versions" | "settings";
+export type View = "diagram" | "sql" | "validation";
 
 export interface ChatMessage {
   id: string;
@@ -13,28 +15,45 @@ export interface ChatMessage {
   ops?: OpResult[];
   error?: string;
   status?: string;
+  /** Set when the reply carries model edits that wait for (or went through) approval. */
+  proposal?: "pending" | "applied" | "discarded" | "superseded";
 }
 
-export const NODE_WIDTH = 270;
-export const nodeHeight = (t: Table) => 40 + Math.max(1, t.columns.length) * 26 + 8;
+export const NODE_WIDTH = 250;
+/** Wide tables show their key columns plus enough others to reach this many rows. */
+export const MAX_NODE_COLUMNS = 12;
+export const relationColumns = (m: DataModel) => new Set(m.relationships.flatMap((r) => [...r.fromColumns, ...r.toColumns]));
+export function visibleColumns(t: Table, relCols: Set<string>): Column[] {
+  if (t.columns.length <= MAX_NODE_COLUMNS) return t.columns;
+  const isKey = (c: Column) => c.primaryKey || relCols.has(c.id);
+  let room = Math.max(0, MAX_NODE_COLUMNS - t.columns.filter(isKey).length);
+  return t.columns.filter((c) => isKey(c) || room-- > 0);
+}
+export const nodeHeight = (t: Table, relCols: Set<string>) => {
+  const shown = visibleColumns(t, relCols).length;
+  return 36 + Math.max(1, shown) * 26 + (shown < t.columns.length ? 26 : 0) + 6;
+};
 
 export function layoutModel(m: DataModel): DataModel {
   const g = new dagre.graphlib.Graph();
-  g.setGraph({ rankdir: "LR", nodesep: 40, ranksep: 110, marginx: 40, marginy: 40 });
+  g.setGraph({ rankdir: "LR", nodesep: 44, ranksep: 120, marginx: 40, marginy: 40 });
   g.setDefaultEdgeLabel(() => ({}));
-  m.tables.forEach((t) => g.setNode(t.id, { width: NODE_WIDTH, height: nodeHeight(t) }));
+  const rel = relationColumns(m);
+  m.tables.forEach((t) => g.setNode(t.id, { width: NODE_WIDTH, height: nodeHeight(t, rel) }));
   m.relationships.forEach((r) => r.fromTable !== r.toTable && g.setEdge(r.toTable, r.fromTable));
   dagre.layout(g);
   return {
     ...m,
     tables: m.tables.map((t) => {
       const n = g.node(t.id);
-      return { ...t, position: { x: Math.round(n.x - NODE_WIDTH / 2), y: Math.round(n.y - nodeHeight(t) / 2) } };
+      return { ...t, position: { x: Math.round(n.x - NODE_WIDTH / 2), y: Math.round(n.y - nodeHeight(t, rel) / 2) } };
     }),
   };
 }
 
 interface State {
+  page: Page;
+  setupMode: "create" | "edit";
   model: DataModel;
   dirty: boolean;
   past: DataModel[];
@@ -42,23 +61,34 @@ interface State {
   selectedTableId: string | null;
   focusTableId: string | null;
   modal: Modal;
-  compareWith: DataModel | null; // a model handed to the Compare dialog (live database / old version)
-  assistantOpen: boolean;
+  view: View;
+  /** Active diagram tab: null is the whole model, otherwise a subject area. */
+  diagram: string | null;
+  compareWith: DataModel | null;
+  rightTab: "inspector" | "copilot";
+  rightWidth: number;
+  /** The column editor docked under the canvas. */
+  dock: { open: boolean; height: number; max: boolean };
   fitNonce: number;
   settings: SettingsView | null;
   toast: string | null;
   chat: ChatMessage[];
   chatBusy: boolean;
+  /** AI edits waiting for approval (the whole proposed model). */
+  pending: { model: DataModel; messageId: string } | null;
 
+  go: (page: Page, setupMode?: "create" | "edit") => void;
   openModal: (m: Modal) => void;
+  setView: (v: View) => void;
+  setDiagram: (d: string | null) => void;
   notify: (msg: string) => void;
   select: (id: string | null, focus?: boolean) => void;
   update: (fn: (m: DataModel) => DataModel, opts?: { fit?: boolean }) => void;
   load: (m: DataModel, opts?: { dirty?: boolean; layout?: boolean }) => void;
-  newModel: (name: string, dialect: Dialect) => void;
   undo: () => void;
   redo: () => void;
   autoLayout: () => void;
+  fit: () => void;
   save: () => Promise<void>;
   loadSettings: () => Promise<void>;
   setCompareWith: (m: DataModel | null) => void;
@@ -74,17 +104,32 @@ interface State {
   updateRelationship: (id: string, patch: Partial<Relationship>) => void;
   deleteRelationship: (id: string) => void;
 
-  toggleAssistant: (open?: boolean) => void;
+  setRightTab: (t: "inspector" | "copilot") => void;
+  setRightWidth: (w: number) => void;
+  openColumns: (tableId?: string) => void;
+  setDock: (patch: Partial<State["dock"]>) => void;
+  moveColumn: (tableId: string, columnId: string, dir: -1 | 1) => void;
+  addColumns: (tableId: string, columns: Partial<Column>[]) => void;
   askAI: (message: string, context?: string) => Promise<void>;
   stopAI: () => void;
   clearChat: () => void;
+  applyProposal: () => void;
+  discardProposal: () => void;
 }
 
 let abort: AbortController | null = null;
 let toastTimer: ReturnType<typeof setTimeout> | undefined;
 const mapTable = (m: DataModel, id: string, fn: (t: Table) => Table): DataModel => ({ ...m, tables: m.tables.map((t) => (t.id === id ? fn(t) : t)) });
+const addedTables = (before: DataModel, after: DataModel) => after.tables.filter((t) => !before.tables.some((b) => b.id === t.id)).length;
+/** Lay out when the copilot built or substantially grew the model. */
+const maybeLayout = (before: DataModel, after: DataModel) => {
+  const n = addedTables(before, after);
+  return n >= 2 || (n > 0 && !before.tables.length) ? layoutModel(after) : after;
+};
 
 export const useStore = create<State>((set, get) => ({
+  page: "landing",
+  setupMode: "create",
   model: emptyModel("Untitled model"),
   dirty: false,
   past: [],
@@ -92,21 +137,39 @@ export const useStore = create<State>((set, get) => ({
   selectedTableId: null,
   focusTableId: null,
   modal: null,
+  view: "diagram",
+  diagram: null,
   compareWith: null,
-  assistantOpen: true,
+  rightTab: "inspector",
+  rightWidth: Number(localStorage.getItem("dm:rightWidth")) || 380,
+  dock: { open: false, height: Number(localStorage.getItem("dm:dockHeight")) || 320, max: false },
   fitNonce: 0,
   settings: null,
   toast: null,
   chat: [],
   chatBusy: false,
+  pending: null,
 
+  go: (page, setupMode) => {
+    localStorage.setItem("dm:page", page);
+    set((s) => ({ page, setupMode: setupMode ?? s.setupMode, modal: null }));
+  },
   openModal: (modal) => set({ modal }),
+  setView: (view) => set({ view }),
+  setDiagram: (diagram) => set((s) => ({ diagram, view: "diagram", fitNonce: s.fitNonce + 1 })),
   notify: (toast) => {
     set({ toast });
     clearTimeout(toastTimer);
     toastTimer = setTimeout(() => set({ toast: null }), 2600);
   },
-  select: (id, focus) => set({ selectedTableId: id, focusTableId: focus ? id : null }),
+  select: (id, focus) =>
+    set((s) => ({
+      selectedTableId: id,
+      focusTableId: focus ? id : null,
+      view: focus ? "diagram" : s.view,
+      // Selecting a table brings its inspector forward, unless the copilot is mid-reply.
+      rightTab: id && !s.chatBusy ? "inspector" : s.rightTab,
+    })),
   setCompareWith: (compareWith) => set({ compareWith }),
 
   update: (fn, opts) =>
@@ -125,19 +188,22 @@ export const useStore = create<State>((set, get) => ({
   load: (m, opts) => {
     const model = opts?.layout ? layoutModel(m) : m;
     localStorage.setItem("dm:lastModel", model.id);
-    set((s) => ({ model, past: [], future: [], dirty: !!opts?.dirty, selectedTableId: null, chat: [], fitNonce: s.fitNonce + 1 }));
+    localStorage.setItem("dm:page", "workspace");
+    set((s) => ({
+      model, past: [], future: [], dirty: !!opts?.dirty, selectedTableId: null, chat: [], pending: null,
+      page: "workspace", modal: null, view: "diagram", diagram: null, fitNonce: s.fitNonce + 1,
+    }));
   },
-  newModel: (name, dialect) => get().load(emptyModel(name, dialect), { dirty: true }),
 
   undo: () =>
     set((s) => (s.past.length ? { model: s.past[s.past.length - 1], past: s.past.slice(0, -1), future: [s.model, ...s.future], dirty: true } : s)),
   redo: () => set((s) => (s.future.length ? { model: s.future[0], future: s.future.slice(1), past: [...s.past, s.model], dirty: true } : s)),
   autoLayout: () => get().update(layoutModel, { fit: true }),
+  fit: () => set((s) => ({ fitNonce: s.fitNonce + 1 })),
 
   save: async () => {
     try {
       const saved = await api.saveModel(get().model);
-      localStorage.setItem("dm:lastModel", saved.id);
       set((s) => ({ model: { ...s.model, updatedAt: saved.updatedAt }, dirty: false }));
       get().notify("Model saved");
     } catch (e) {
@@ -147,19 +213,23 @@ export const useStore = create<State>((set, get) => ({
   loadSettings: async () => set({ settings: await api.getSettings() }),
 
   addTable: (position) => {
-    const { model } = get();
-    let n = model.tables.length + 1;
-    while (model.tables.some((t) => t.name === `table_${n}`)) n++;
+    const { model, diagram } = get();
+    const upper = model.tables.length > 0 && model.tables.every((t) => t.name === t.name.toUpperCase());
+    const base = upper ? "NEW_ENTITY_" : "new_entity_";
+    let n = 1;
+    while (model.tables.some((t) => t.name === base + n)) n++;
     const maxX = model.tables.reduce((m, t) => Math.max(m, t.position.x), -300);
+    const keyType = model.dialect === "sqlite" ? "integer" : model.dialect === "snowflake" ? "number(38,0)" : "bigint";
     const table: Table = {
       id: uid("t_"),
-      name: `table_${n}`,
-      columns: [newColumn({ name: "id", type: model.dialect === "sqlite" ? "integer" : "bigint", nullable: false, primaryKey: true, autoIncrement: true })],
+      name: base + n,
+      subjectArea: diagram ?? undefined,
+      columns: [newColumn({ name: "id", type: keyType, nullable: false, primaryKey: true, autoIncrement: true })],
       indexes: [],
       position: position ?? { x: maxX + 320, y: 60 },
     };
     get().update((m) => ({ ...m, tables: [...m.tables, table] }));
-    set({ selectedTableId: table.id, focusTableId: position ? null : table.id });
+    set({ selectedTableId: table.id, focusTableId: position ? null : table.id, view: "diagram" });
   },
   updateTable: (id, patch) => get().update((m) => mapTable(m, id, (t) => ({ ...t, ...patch }))),
   deleteTable: (id) => {
@@ -201,17 +271,63 @@ export const useStore = create<State>((set, get) => ({
     get().update((m) => ({ ...m, relationships: m.relationships.map((r) => (r.id === id ? { ...r, ...patch } : r)) })),
   deleteRelationship: (id) => get().update((m) => ({ ...m, relationships: m.relationships.filter((r) => r.id !== id) })),
 
-  toggleAssistant: (open) => set((s) => ({ assistantOpen: open ?? !s.assistantOpen })),
-  clearChat: () => set({ chat: [] }),
+  setRightTab: (rightTab) => set({ rightTab }),
+  setRightWidth: (w) => {
+    const rightWidth = Math.round(Math.min(760, Math.max(320, w)));
+    localStorage.setItem("dm:rightWidth", String(rightWidth));
+    set({ rightWidth });
+  },
+  openColumns: (tableId) => set((s) => ({ dock: { ...s.dock, open: true }, view: "diagram", selectedTableId: tableId ?? s.selectedTableId })),
+  setDock: (patch) =>
+    set((s) => {
+      const dock = { ...s.dock, ...patch };
+      localStorage.setItem("dm:dockHeight", String(dock.height));
+      return { dock };
+    }),
+  moveColumn: (tableId, columnId, dir) =>
+    get().update((m) =>
+      mapTable(m, tableId, (t) => {
+        const i = t.columns.findIndex((c) => c.id === columnId), j = i + dir;
+        if (i < 0 || j < 0 || j >= t.columns.length) return t;
+        const columns = [...t.columns];
+        [columns[i], columns[j]] = [columns[j], columns[i]];
+        return { ...t, columns };
+      }),
+    ),
+  addColumns: (tableId, cols) =>
+    get().update((m) =>
+      mapTable(m, tableId, (t) => {
+        const taken = new Set(t.columns.map((c) => c.name.toLowerCase()));
+        const fresh = cols.filter((c) => c.name && !taken.has(c.name.toLowerCase()) && taken.add(c.name.toLowerCase()));
+        return fresh.length ? { ...t, columns: [...t.columns, ...fresh.map((c) => newColumn(c))] } : t;
+      }),
+    ),
+  clearChat: () => set({ chat: [], pending: null }),
   stopAI: () => abort?.abort(),
+
+  applyProposal: () => {
+    const { pending, model } = get();
+    if (!pending) return;
+    const next = maybeLayout(model, pending.model);
+    get().update(() => next, { fit: next !== pending.model });
+    set((s) => ({ pending: null, chat: s.chat.map((m) => (m.id === pending.messageId ? { ...m, proposal: "applied" } : m)) }));
+    get().notify("Changes applied to the model");
+  },
+  discardProposal: () =>
+    set((s) => ({ pending: null, chat: s.chat.map((m) => (m.id === s.pending?.messageId ? { ...m, proposal: "discarded" } : m)) })),
 
   askAI: async (message, context) => {
     if (get().chatBusy || !message.trim()) return;
     const history = get().chat.filter((m) => m.text).map((m) => ({ role: m.role, text: m.text }));
     const replyId = uid("a_");
-    const before = get().model;
+    const needsApproval = !!get().model.intent?.guardrails.approval;
+    // A follow-up builds on a proposal that is still waiting, so the next proposal includes it.
+    const before = get().pending?.model ?? get().model;
+    // Tell the copilot what the modeler is looking at, so "this table" means something.
+    const selected = before.tables.find((t) => t.id === get().selectedTableId);
+    if (selected) context = `The modeler currently has the table ${selected.name} selected.` + (context ? `\n\n${context}` : "");
     set((s) => ({
-      assistantOpen: true,
+      rightTab: "copilot",
       chatBusy: true,
       chat: [...s.chat, { id: uid("u_"), role: "user", text: message }, { id: replyId, role: "assistant", text: "", status: "Thinking…" }],
     }));
@@ -224,16 +340,23 @@ export const useStore = create<State>((set, get) => ({
           if (e.type === "text") patch((m) => ({ ...m, text: m.text + e.delta, status: undefined }));
           else if (e.type === "status") patch((m) => ({ ...m, status: e.message }));
           else if (e.type === "ops") patch((m) => ({ ...m, ops: [...(m.ops ?? []), ...e.results], status: "Working…" }));
-          else if (e.type === "model") get().update(() => e.model);
           else if (e.type === "error") patch((m) => ({ ...m, error: e.message, status: undefined }));
+          else if (e.type === "model") {
+            if (needsApproval) {
+              set((s) => ({
+                pending: { model: e.model, messageId: replyId },
+                chat: s.chat.map((m) =>
+                  m.id === replyId ? { ...m, proposal: "pending" } : m.proposal === "pending" ? { ...m, proposal: "superseded" } : m,
+                ),
+              }));
+            } else get().update(() => e.model);
+          }
         },
         abort.signal,
       );
-      // Lay out the diagram when the assistant built or substantially grew the model.
-      const after = get().model;
-      const added = after.tables.filter((t) => !before.tables.some((b) => b.id === t.id)).length;
-      if (added >= 2 || (added && !before.tables.length)) {
-        set((s) => ({ model: layoutModel(s.model), fitNonce: s.fitNonce + 1 }));
+      if (!needsApproval) {
+        const laid = maybeLayout(before, get().model);
+        if (laid !== get().model) set((s) => ({ model: laid, fitNonce: s.fitNonce + 1 }));
       }
     } catch (e) {
       if (!abort.signal.aborted) patch((m) => ({ ...m, error: (e as Error).message }));

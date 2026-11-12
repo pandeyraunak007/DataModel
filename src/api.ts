@@ -9,11 +9,25 @@ async function http<T>(url: string, init?: RequestInit): Promise<T> {
 }
 const json = (method: string, body: unknown): RequestInit => ({ method, body: JSON.stringify(body) });
 
-export interface SettingsView {
-  hasApiKey: boolean;
+export interface ProviderView {
+  id: string;
+  label: string;
+  keyHelp: string;
+  env: string;
+  defaultModel: string;
+  hasKey: boolean;
+  ready: boolean;
   keySource: "settings" | "env" | "none";
   keyHint: string;
-  aiModel: string;
+  model: string;
+  baseUrl: string;
+}
+export interface SettingsView {
+  provider: string;
+  providerLabel: string;
+  /** True when the active provider is ready to use. */
+  hasApiKey: boolean;
+  providers: ProviderView[];
 }
 
 export const api = {
@@ -26,7 +40,8 @@ export const api = {
   getVersion: (id: string, v: number) => http<DataModel>(`/api/models/${id}/versions/${v}`),
   introspect: (connection: ConnectionConfig) => http<DataModel>("/api/db/introspect", json("POST", { connection })),
   getSettings: () => http<SettingsView>("/api/settings"),
-  saveSettings: (s: { apiKey?: string; aiModel?: string; clearApiKey?: boolean }) => http<SettingsView>("/api/settings", json("PUT", s)),
+  saveSettings: (s: { provider: string; apiKey?: string; model?: string; baseUrl?: string; clearApiKey?: boolean }) => http<SettingsView>("/api/settings", json("PUT", s)),
+  listProviderModels: (provider: string) => http<string[]>(`/api/settings/models?provider=${encodeURIComponent(provider)}`),
 };
 
 export type ChatEvent =

@@ -4,7 +4,9 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { modelSubtitle } from "../shared/intent.ts";
 import type { DataModel, ModelSummary, VersionInfo } from "../shared/types.ts";
+import { provider, type ProviderId } from "./providers.ts";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 export const DATA_DIR = path.resolve(here, "..", "data");
@@ -36,6 +38,7 @@ export function listModels(): ModelSummary[] {
         id: m.id,
         name: m.name,
         dialect: m.dialect,
+        subtitle: modelSubtitle(m),
         tableCount: m.tables.length,
         updatedAt: m.updatedAt,
         latestVersion: v.length ? parseInt(v[v.length - 1], 10) : 0,
@@ -91,26 +94,46 @@ export function getVersion(id: string, version: number): DataModel | null {
   return fs.existsSync(file) ? readJson<VersionFile>(file).model : null;
 }
 
-// ---- settings (API key stays on the server and is never sent back to the browser) ----
+// ---- settings (API keys stay on the server and are never sent back to the browser) ----
 
 export interface Settings {
+  provider?: ProviderId;
+  keys?: Partial<Record<ProviderId, string>>;
+  models?: Partial<Record<ProviderId, string>>;
+  /** Base URL of the custom OpenAI-compatible endpoint. */
+  baseUrl?: string;
+  /** Legacy single-provider fields, read once and migrated. */
   apiKey?: string;
   aiModel?: string;
 }
-export const DEFAULT_AI_MODEL = "claude-opus-5-5";
 
 export function readSettings(): Settings {
-  return fs.existsSync(SETTINGS_FILE) ? readJson<Settings>(SETTINGS_FILE) : {};
+  const s: Settings = fs.existsSync(SETTINGS_FILE) ? readJson<Settings>(SETTINGS_FILE) : {};
+  if (s.apiKey || s.aiModel) {
+    s.keys = { anthropic: s.apiKey, ...s.keys };
+    s.models = { anthropic: s.aiModel, ...s.models };
+    delete s.apiKey;
+    delete s.aiModel;
+  }
+  return s;
 }
-export function writeSettings(patch: Settings) {
-  const next = { ...readSettings(), ...patch };
-  if (!next.apiKey) delete next.apiKey;
+
+export function writeSettings(next: Settings) {
   writeJson(SETTINGS_FILE, next, 0o600);
   fs.chmodSync(SETTINGS_FILE, 0o600);
 }
-export function resolveApiKey(): { key?: string; source: "settings" | "env" | "none" } {
+
+/** Everything needed to call one provider: key (settings first, then environment), model, base URL. */
+export function resolveProvider(id?: string) {
   const s = readSettings();
-  if (s.apiKey) return { key: s.apiKey, source: "settings" };
-  if (process.env.ANTHROPIC_API_KEY) return { key: process.env.ANTHROPIC_API_KEY, source: "env" };
-  return { source: "none" };
+  const info = provider(id ?? s.provider);
+  const stored = s.keys?.[info.id];
+  const env = info.env ? process.env[info.env] : undefined;
+  return {
+    info,
+    key: stored || env || undefined,
+    keySource: (stored ? "settings" : env ? "env" : "none") as "settings" | "env" | "none",
+    model: s.models?.[info.id] || info.defaultModel,
+    baseUrl: (info.id === "custom" ? s.baseUrl ?? "" : info.baseUrl).replace(/\/+$/, ""),
+  };
 }
