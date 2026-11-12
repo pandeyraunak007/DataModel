@@ -1,6 +1,7 @@
 import { useDeferredValue, useMemo, useState } from "react";
-import { columnClass, modelSubtitle, pattern, ROLE_LABEL, tableRole } from "../../shared/intent.ts";
-import { uid, type RefAction, type Table, type TableRole } from "../../shared/types.ts";
+import { columnClass, modelSubtitle, pattern, platformLabel, ROLE_LABEL, tableRole } from "../../shared/intent.ts";
+import { kindInfo } from "../../shared/objects.ts";
+import { uid, type DbObject, type RefAction, type Table, type TableRole } from "../../shared/types.ts";
 import { validateModel } from "../../shared/validate.ts";
 import { useStore } from "../store.ts";
 import { SQL_TYPES } from "./ColumnGrid.tsx";
@@ -208,7 +209,48 @@ function TableInspector({ table }: { table: Table }) {
   );
 }
 
+function ObjectInspector({ object: o }: { object: DbObject }) {
+  const model = useStore((s) => s.model);
+  const s = useStore.getState();
+  const k = kindInfo(o.kind);
+  const supported = k.dialects.includes(model.dialect);
+  return (
+    <>
+      <div className="object-title">
+        <div className="objicon mono">{k.chip}</div>
+        <div><b>{o.name}</b><small>{k.label} · {platformLabel(model)}</small></div>
+      </div>
+      {!supported && <div className="inline-reco"><b>Not available on {platformLabel(model)}</b><p>This model's platform has no {k.label.toLowerCase()} objects. It is kept in the model and written as a comment when you forward engineer.</p></div>}
+      <div className="prop"><span>Name</span><input value={o.name} onChange={(e) => s.updateObject(o.id, { name: e.target.value })} /></div>
+      <div className="prop"><span>Schema</span><input value={o.schema ?? ""} placeholder="default" onChange={(e) => s.updateObject(o.id, { schema: e.target.value || undefined })} /></div>
+      {o.kind === "trigger" && (
+        <div className="prop">
+          <span>On table</span>
+          <input list="trigger-tables" value={o.table ?? ""} onChange={(e) => s.updateObject(o.id, { table: e.target.value || undefined })} />
+          <datalist id="trigger-tables">{model.tables.map((t) => <option key={t.id} value={t.name} />)}</datalist>
+        </div>
+      )}
+      <div className="prop col"><span>Description</span><textarea rows={2} value={o.comment ?? ""} onChange={(e) => s.updateObject(o.id, { comment: e.target.value || undefined })} /></div>
+      <div className="mini-head">Definition</div>
+      <textarea className="defn" spellCheck={false} value={o.definition} onChange={(e) => s.updateObject(o.id, { definition: e.target.value })} />
+      <p className="hint">The complete CREATE statement. It is used as written in forward engineering and compare; the name above is how the object is listed and matched.</p>
+      <div className="inline-reco">
+        <b>✧ Copilot</b>
+        <p>Ask for a review, an explanation, or a rewrite of this {k.label.toLowerCase()}.</p>
+        <button onClick={() => s.askAI(`Explain what the ${k.label.toLowerCase()} ${o.name} does and review it for correctness against the tables in this model.`, o.definition)}>Explain and review →</button>{" "}
+        <button onClick={() => s.askAI(`Write the definition of the ${k.label.toLowerCase()} ${o.name} so that it fits this model${o.comment ? ` and does this: ${o.comment}` : ""}. Update the object with update_object.`, o.definition)}>Draft with AI →</button>
+      </div>
+      <button className="smallbtn block danger" onClick={() => s.deleteObject(o.id)}>Delete {k.label.toLowerCase()}</button>
+    </>
+  );
+}
+
 export default function Inspector() {
   const table = useStore((s) => s.model.tables.find((t) => t.id === s.selectedTableId));
-  return <div className="inspect-scroll">{table ? <TableInspector key={table.id} table={table} /> : <ModelProfile />}</div>;
+  const object = useStore((s) => (s.model.objects ?? []).find((o) => o.id === s.selectedObjectId));
+  return (
+    <div className="inspect-scroll">
+      {object ? <ObjectInspector key={object.id} object={object} /> : table ? <TableInspector key={table.id} table={table} /> : <ModelProfile />}
+    </div>
+  );
 }

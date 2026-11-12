@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { generateDDL } from "../../shared/ddl.ts";
 import { describeDiff, diffModels, generateMigration } from "../../shared/diff.ts";
+import { kindInfo } from "../../shared/objects.ts";
 import { DIALECTS, type ConnectionConfig, type DataModel, type Dialect, type VersionInfo } from "../../shared/types.ts";
 import { api, download } from "../api.ts";
 import { useStore } from "../store.ts";
@@ -244,6 +245,9 @@ export function CompareModal() {
               </div>
             ))}
             {diff.relationshipsAdded.map((r, i) => <div key={"a" + i} className="d add">+ foreign key {r.fromTable}({r.fromColumns.join(", ")}) → {r.toTable}({r.toColumns.join(", ")})</div>)}
+            {diff.objectsAdded.map((o) => <div key={o.id} className="d add">+ {kindInfo(o.kind).label.toLowerCase()} <b>{o.name}</b></div>)}
+            {diff.objectsRemoved.map((o) => <div key={o.id} className="d del">− {kindInfo(o.kind).label.toLowerCase()} <b>{o.name}</b></div>)}
+            {diff.objectsChanged.map((o) => <div key={o.to.id} className="d chg">~ {kindInfo(o.to.kind).label.toLowerCase()} <b>{o.to.name}</b>: definition changed</div>)}
             {diff.relationshipsRemoved.map((r, i) => <div key={"r" + i} className="d del">− foreign key {r.fromTable}({r.fromColumns.join(", ")}) → {r.toTable}({r.toColumns.join(", ")})</div>)}
           </div>
           <div className="script">

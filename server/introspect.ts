@@ -2,7 +2,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { emptyModel, newColumn, uid, type ConnectionConfig, type DataModel, type RefAction, type Table } from "../shared/types.ts";
+import { emptyModel, newColumn, uid, type ConnectionConfig, type DataModel, type DbObject, type RefAction, type Table } from "../shared/types.ts";
 import { DATA_DIR } from "./store.ts";
 
 interface RawColumn {
@@ -34,7 +34,9 @@ interface RawFk {
   onDelete?: string;
   onUpdate?: string;
 }
+type RawObject = Omit<DbObject, "id">;
 interface Raw {
+  objects?: RawObject[];
   tables: RawTable[];
   fks: RawFk[];
 }
@@ -102,6 +104,9 @@ function build(raw: Raw, cfg: ConnectionConfig, name: string): DataModel {
       onUpdate: refAction(fk.onUpdate),
     });
   }
+  model.objects = (raw.objects ?? [])
+    .filter((o) => o.name && o.definition)
+    .map((o) => ({ ...o, id: uid("o_"), definition: o.definition.trim(), comment: o.comment || undefined }));
   return model;
 }
 
@@ -198,7 +203,46 @@ async function postgres(cfg: ConnectionConfig): Promise<Raw> {
         refSchema: c.ref_schema, refTable: c.ref_table, refColumns: c.ref_columns ?? [],
         onDelete: act[c.del], onUpdate: act[c.upd],
       }));
-    return { tables, fks };
+    // ---- other database objects
+    const objects: RawObject[] = [];
+    const ident = (n: string) => (/^[a-z_][a-z0-9_]*$/.test(n) ? n : '"' + n.replace(/"/g, '""') + '"');
+    const qn = (sch: string, n: string) => (sch === "public" ? ident(n) : `${ident(sch)}.${ident(n)}`);
+    const sw = where.replace(/n\.nspname/g, "x.sch");
+    const obj = async (sql: string, map: (r: Record<string, any>) => RawObject) => {
+      // One failing catalog query (permissions, older server) must not sink the whole import.
+      try {
+        for (const r of (await client.query(sql, [schema])).rows) objects.push(map(r));
+      } catch {}
+    };
+    await obj(`SELECT extname AS name FROM pg_extension WHERE extname <> 'plpgsql' AND $1::text IS NULL`, (r) => ({ kind: "extension", name: r.name, definition: `CREATE EXTENSION IF NOT EXISTS ${ident(r.name)};` }));
+    await obj(
+      `SELECT n.nspname AS sch, t.typname AS name, array_agg(e.enumlabel::text ORDER BY e.enumsortorder) AS labels
+       FROM pg_type t JOIN pg_enum e ON e.enumtypid = t.oid JOIN pg_namespace n ON n.oid = t.typnamespace WHERE ${where} GROUP BY 1, 2`,
+      (r) => ({ kind: "type", name: r.name, schema: r.sch, definition: `CREATE TYPE ${qn(r.sch, r.name)} AS ENUM (${r.labels.map((l: string) => `'${l.replace(/'/g, "''")}'`).join(", ")});` }),
+    );
+    await obj(
+      `SELECT * FROM (SELECT schemaname AS sch, sequencename AS name, start_value, increment_by FROM pg_sequences) x
+       WHERE ${sw} AND NOT EXISTS (
+         SELECT 1 FROM pg_depend d JOIN pg_class c ON c.oid = d.objid JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE d.deptype IN ('a', 'i') AND c.relkind = 'S' AND c.relname = x.name AND n.nspname = x.sch)`,
+      (r) => ({ kind: "sequence", name: r.name, schema: r.sch, definition: `CREATE SEQUENCE ${qn(r.sch, r.name)} START WITH ${r.start_value} INCREMENT BY ${r.increment_by};` }),
+    );
+    await obj(`SELECT * FROM (SELECT schemaname AS sch, viewname AS name, definition FROM pg_views) x WHERE ${sw}`,
+      (r) => ({ kind: "view", name: r.name, schema: r.sch, definition: `CREATE VIEW ${qn(r.sch, r.name)} AS\n${String(r.definition).trim()}` }));
+    await obj(`SELECT * FROM (SELECT schemaname AS sch, matviewname AS name, definition FROM pg_matviews) x WHERE ${sw}`,
+      (r) => ({ kind: "materialized_view", name: r.name, schema: r.sch, definition: `CREATE MATERIALIZED VIEW ${qn(r.sch, r.name)} AS\n${String(r.definition).trim()}` }));
+    await obj(
+      `SELECT n.nspname AS sch, p.proname AS name, p.prokind AS kind, pg_get_functiondef(p.oid) AS def
+       FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+       WHERE p.prokind IN ('f', 'p') AND ${where} AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.objid = p.oid AND d.deptype = 'e')`,
+      (r) => ({ kind: r.kind === "p" ? "procedure" : "function", name: r.name, schema: r.sch, definition: String(r.def).replace(/^CREATE OR REPLACE /, "CREATE ") }),
+    );
+    await obj(
+      `SELECT n.nspname AS sch, c.relname AS tbl, t.tgname AS name, pg_get_triggerdef(t.oid) AS def
+       FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE NOT t.tgisinternal AND ${where}`,
+      (r) => ({ kind: "trigger", name: r.name, schema: r.sch, table: r.tbl, definition: r.def }),
+    );
+    return { tables, fks, objects };
   } finally {
     await client.end();
   }
@@ -257,7 +301,22 @@ async function mysql(cfg: ConnectionConfig): Promise<Raw> {
     const fks: RawFk[] = [...group(fkRows, (r) => `${r.t}.${r.name}`).values()].map((r) => ({
       name: r[0].name, table: r[0].t, columns: r.map((x) => x.c), refTable: r[0].rt, refColumns: r.map((x) => x.rc), onDelete: r[0].del, onUpdate: r[0].upd,
     }));
-    return { tables, fks };
+    // ---- other database objects (SHOW CREATE returns the complete statement)
+    const objects: RawObject[] = [];
+    const bq = (n: string) => "`" + n.replace(/`/g, "``") + "`";
+    const strip = (sql: unknown) => String(sql ?? "").replace(/\sDEFINER=`[^`]*`@`[^`]*`/g, "").replace(/\sALGORITHM=\w+/g, "").replace(/\sSQL SECURITY \w+/g, "");
+    const show = async (kind: RawObject["kind"], what: string, name: string, col: string, table?: string) => {
+      try {
+        const [r] = (await conn.query(`SHOW CREATE ${what} ${bq(name)}`))[0] as Record<string, any>[];
+        if (r?.[col]) objects.push({ kind, name, table, definition: strip(r[col]) });
+      } catch {}
+    };
+    for (const r of await rows(`SELECT TABLE_NAME AS n FROM information_schema.VIEWS WHERE TABLE_SCHEMA = ?`)) await show("view", "VIEW", r.n, "Create View");
+    for (const r of await rows(`SELECT ROUTINE_NAME AS n, ROUTINE_TYPE AS t FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = ?`))
+      await show(r.t === "PROCEDURE" ? "procedure" : "function", r.t, r.n, r.t === "PROCEDURE" ? "Create Procedure" : "Create Function");
+    for (const r of await rows(`SELECT TRIGGER_NAME AS n, EVENT_OBJECT_TABLE AS t FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = ?`)) await show("trigger", "TRIGGER", r.n, "SQL Original Statement", r.t);
+    for (const r of await rows(`SELECT EVENT_NAME AS n FROM information_schema.EVENTS WHERE EVENT_SCHEMA = ?`).catch(() => [])) await show("event", "EVENT", r.n, "Create Event");
+    return { tables, fks, objects };
   } finally {
     await conn.end();
   }
@@ -330,7 +389,23 @@ async function sqlserver(cfg: ConnectionConfig): Promise<Raw> {
       name: r[0].name, schema: r[0].schema, table: r[0].table, columns: r.map((x) => x.column),
       refSchema: r[0].ref_schema, refTable: r[0].ref_table, refColumns: r.map((x) => x.ref_column), onDelete: r[0].del, onUpdate: r[0].upd,
     }));
-    return { tables, fks };
+    // ---- other database objects
+    const objects: RawObject[] = [];
+    const br = (sch: string, n: string) => `[${sch}].[${n}]`;
+    const tryRun = (sql: string) => run(sql).catch(() => [] as Record<string, any>[]);
+    const kinds: Record<string, RawObject["kind"]> = { V: "view", P: "procedure", FN: "function", IF: "function", TF: "function", TR: "trigger" };
+    for (const r of await tryRun(
+      `SELECT s.name AS [schema], o.name, RTRIM(o.type) AS type, m.definition, pt.name AS parent
+       FROM sys.sql_modules m JOIN sys.objects o ON o.object_id = m.object_id JOIN sys.schemas s ON s.schema_id = o.schema_id
+       LEFT JOIN sys.tables pt ON pt.object_id = o.parent_object_id
+       WHERE o.is_ms_shipped = 0 AND RTRIM(o.type) IN ('V','P','FN','IF','TF','TR') AND ${where}`,
+    ))
+      if (r.definition) objects.push({ kind: kinds[r.type], name: r.name, schema: r.schema, table: r.parent ?? undefined, definition: r.definition });
+    for (const r of await tryRun(`SELECT s.name AS [schema], q.name, TYPE_NAME(q.user_type_id) AS type, CAST(q.start_value AS bigint) AS start, CAST(q.increment AS bigint) AS inc FROM sys.sequences q JOIN sys.schemas s ON s.schema_id = q.schema_id WHERE ${where}`))
+      objects.push({ kind: "sequence", name: r.name, schema: r.schema, definition: `CREATE SEQUENCE ${br(r.schema, r.name)} AS ${r.type} START WITH ${r.start} INCREMENT BY ${r.inc};` });
+    for (const r of await tryRun(`SELECT s.name AS [schema], y.name, y.base_object_name AS base FROM sys.synonyms y JOIN sys.schemas s ON s.schema_id = y.schema_id WHERE ${where}`))
+      objects.push({ kind: "synonym", name: r.name, schema: r.schema, definition: `CREATE SYNONYM ${br(r.schema, r.name)} FOR ${r.base};` });
+    return { tables, fks, objects };
   } finally {
     await pool.close();
   }
@@ -375,7 +450,13 @@ function sqlite(cfg: ConnectionConfig): Raw {
     for (const fk of fks) {
       if (fk.refColumns.some((c) => !c)) fk.refColumns = tables.find((t) => t.name === fk.refTable)?.pk ?? [];
     }
-    return { tables, fks };
+    const objects: RawObject[] = all(`SELECT type, name, tbl_name, sql FROM sqlite_master WHERE type IN ('view', 'trigger') AND sql IS NOT NULL ORDER BY name`).map((r) => ({
+      kind: r.type === "view" ? ("view" as const) : ("trigger" as const),
+      name: r.name,
+      table: r.type === "trigger" ? r.tbl_name : undefined,
+      definition: r.sql,
+    }));
+    return { tables, fks, objects };
   } finally {
     db.close();
   }

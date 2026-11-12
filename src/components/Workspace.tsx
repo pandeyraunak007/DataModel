@@ -1,6 +1,6 @@
 import { useDeferredValue, useMemo, useState, type PointerEvent } from "react";
 import { createTableSQL, generateDDL } from "../../shared/ddl.ts";
-import { modelSubtitle, ROLE_LABEL, tableRole } from "../../shared/intent.ts";
+import { modelSubtitle } from "../../shared/intent.ts";
 import type { DataModel, Table } from "../../shared/types.ts";
 import { validateModel, type Finding } from "../../shared/validate.ts";
 import { download } from "../api.ts";
@@ -8,6 +8,7 @@ import { useStore } from "../store.ts";
 import Copilot from "./Assistant.tsx";
 import Canvas, { zoom } from "./Canvas.tsx";
 import ColumnGrid from "./ColumnGrid.tsx";
+import Explorer from "./Explorer.tsx";
 import Inspector from "./Inspector.tsx";
 
 const areaOf = (t: Table) => t.subjectArea || "Unassigned";
@@ -40,59 +41,6 @@ function ModelBar({ findings }: { findings: Finding[] }) {
         <button className="smallbtn primary" onClick={() => s.addTable()}>＋ New entity</button>
       </div>
     </div>
-  );
-}
-
-function Explorer({ findings }: { findings: Finding[] }) {
-  const model = useStore((s) => s.model);
-  const selected = useStore((s) => s.selectedTableId);
-  const s = useStore.getState();
-  const [query, setQuery] = useState("");
-  const [closed, setClosed] = useState<Set<string>>(new Set());
-  const q = query.trim().toLowerCase();
-  const match = (t: Table) => !q || t.name.toLowerCase().includes(q) || t.columns.some((c) => c.name.toLowerCase().includes(q));
-  const areas = areasOf(model);
-  const indexes = model.tables.reduce((n, t) => n + t.indexes.length, 0);
-  return (
-    <aside className="explorer">
-      <div className="explorer-head">
-        <b>Model Explorer</b>
-        <input className="search" placeholder="Search tables and columns…" value={query} onChange={(e) => setQuery(e.target.value)} />
-      </div>
-      <div className="tree">
-        <div className="tree-label">MODEL STRUCTURE</div>
-        {areas.map((a) => {
-          const tables = model.tables.filter((t) => areaOf(t) === a && match(t)).sort((x, y) => x.name.localeCompare(y.name));
-          if (q && !tables.length) return null;
-          const isClosed = closed.has(a) && !q;
-          return (
-            <div key={a}>
-              <button className="treeitem" onClick={() => setClosed((c) => { const n = new Set(c); n.has(a) ? n.delete(a) : n.add(a); return n; })}>
-                <span className="caret">{isClosed ? "›" : "⌄"}</span>◫ <span>{a}</span><span className="tcount">{tables.length}</span>
-              </button>
-              {!isClosed && (
-                <div className="treechildren">
-                  {tables.map((t) => {
-                    const role = tableRole(t);
-                    return (
-                      <button key={t.id} className={"treeitem" + (t.id === selected ? " sel" : "")} onClick={() => s.select(t.id, true)}>
-                        ▤ <span>{t.name}</span>{role && <span className="tcount">{ROLE_LABEL[role]}</span>}
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-          );
-        })}
-        {!model.tables.length && <p className="hint pad">No tables yet.</p>}
-        <div className="tree-label">MODEL RESOURCES</div>
-        <div className="treeitem static">⌁ <span>Relationships</span><span className="tcount">{model.relationships.length}</span></div>
-        <div className="treeitem static">≡ <span>Indexes</span><span className="tcount">{indexes}</span></div>
-        <button className="treeitem" onClick={() => s.setView("validation")}>✓ <span>Validation findings</span><span className="tcount">{findings.length}</span></button>
-      </div>
-      <div className="treefoot">{model.tables.length} tables · {model.relationships.length} relationships · {areas.length} subject area{areas.length === 1 ? "" : "s"}</div>
-    </aside>
   );
 }
 
@@ -180,7 +128,7 @@ export default function Workspace() {
   const rightTab = useStore((s) => s.rightTab);
   const rightWidth = useStore((s) => s.rightWidth);
   const dock = useStore((s) => s.dock);
-  const selectedName = useStore((s) => s.model.tables.find((t) => t.id === s.selectedTableId)?.name);
+  const selectedName = useStore((s) => (s.model.objects ?? []).find((o) => o.id === s.selectedObjectId)?.name ?? s.model.tables.find((t) => t.id === s.selectedTableId)?.name);
   const chatBusy = useStore((s) => s.chatBusy);
   const hasProposal = useStore((s) => !!s.pending);
   const startResize = (e: PointerEvent<HTMLDivElement>) => {

@@ -1,7 +1,8 @@
 import dagre from "@dagrejs/dagre";
 import { create } from "zustand";
 import type { OpResult } from "../shared/ops.ts";
-import { emptyModel, newColumn, uid, type Column, type DataModel, type Relationship, type Table } from "../shared/types.ts";
+import { objectsOf, objectTemplate } from "../shared/objects.ts";
+import { emptyModel, newColumn, uid, type Column, type DataModel, type DbObject, type DbObjectKind, type Relationship, type Table } from "../shared/types.ts";
 import { api, streamChat, type SettingsView } from "./api.ts";
 
 export type Page = "landing" | "setup" | "workspace";
@@ -61,6 +62,8 @@ interface State {
   past: DataModel[];
   future: DataModel[];
   selectedTableId: string | null;
+  /** A selected non-table object (view, sequence, routine, ...). */
+  selectedObjectId: string | null;
   focusTableId: string | null;
   modal: Modal;
   view: View;
@@ -95,6 +98,10 @@ interface State {
   loadSettings: () => Promise<void>;
   setCompareWith: (m: DataModel | null) => void;
 
+  selectObject: (id: string | null) => void;
+  addObject: (kind: DbObjectKind) => void;
+  updateObject: (id: string, patch: Partial<DbObject>) => void;
+  deleteObject: (id: string) => void;
   addTable: (position?: { x: number; y: number }) => void;
   updateTable: (id: string, patch: Partial<Table>) => void;
   deleteTable: (id: string) => void;
@@ -137,6 +144,7 @@ export const useStore = create<State>((set, get) => ({
   past: [],
   future: [],
   selectedTableId: null,
+  selectedObjectId: null,
   focusTableId: null,
   modal: null,
   view: "diagram",
@@ -167,6 +175,7 @@ export const useStore = create<State>((set, get) => ({
   select: (id, focus) =>
     set((s) => ({
       selectedTableId: id,
+      selectedObjectId: null,
       focusTableId: focus ? id : null,
       view: focus ? "diagram" : s.view,
       // Selecting a table brings its inspector forward, unless the copilot is mid-reply.
@@ -192,7 +201,7 @@ export const useStore = create<State>((set, get) => ({
     localStorage.setItem("dm:lastModel", model.id);
     localStorage.setItem("dm:page", "workspace");
     set((s) => ({
-      model, past: [], future: [], dirty: !!opts?.dirty, selectedTableId: null, chat: [], pending: null,
+      model, past: [], future: [], dirty: !!opts?.dirty, selectedTableId: null, selectedObjectId: null, chat: [], pending: null,
       page: "workspace", modal: null, view: "diagram", diagram: null, fitNonce: s.fitNonce + 1,
     }));
   },
@@ -213,6 +222,23 @@ export const useStore = create<State>((set, get) => ({
     }
   },
   loadSettings: async () => set({ settings: await api.getSettings() }),
+
+  selectObject: (id) => set((s) => ({ selectedObjectId: id, selectedTableId: id ? null : s.selectedTableId, rightTab: id && !s.chatBusy ? "inspector" : s.rightTab })),
+  addObject: (kind) => {
+    const { model } = get();
+    const existing = objectsOf(model).filter((o) => o.kind === kind);
+    let n = existing.length + 1;
+    while (existing.some((o) => o.name === `new_${kind}_${n}`)) n++;
+    const name = `new_${kind}_${n}`;
+    const o: DbObject = { id: uid("o_"), kind, name, definition: objectTemplate(kind, model.dialect, name, model.tables[0]?.name) };
+    get().update((m) => ({ ...m, objects: [...objectsOf(m), o] }));
+    get().selectObject(o.id);
+  },
+  updateObject: (id, patch) => get().update((m) => ({ ...m, objects: objectsOf(m).map((o) => (o.id === id ? { ...o, ...patch } : o)) })),
+  deleteObject: (id) => {
+    get().update((m) => ({ ...m, objects: objectsOf(m).filter((o) => o.id !== id) }));
+    if (get().selectedObjectId === id) set({ selectedObjectId: null });
+  },
 
   addTable: (position) => {
     const { model, diagram } = get();

@@ -1,6 +1,7 @@
 // Compare two models (matched by table / column name) and build a migration script.
 import { columnDef, createTableSQL, mapType, normalizeType, q, tableRef } from "./ddl.ts";
-import type { Column, DataModel, Dialect, Table } from "./types.ts";
+import { dropObjectSQL, kindInfo, normalizeDefinition, objectsOf, objectSQL } from "./objects.ts";
+import type { Column, DataModel, DbObject, Dialect, Table } from "./types.ts";
 
 export interface RelN {
   name?: string;
@@ -39,6 +40,9 @@ export interface ModelDiff {
   tablesChanged: TableChange[];
   relationshipsAdded: RelN[];
   relationshipsRemoved: RelN[];
+  objectsAdded: DbObject[];
+  objectsRemoved: DbObject[];
+  objectsChanged: { from: DbObject; to: DbObject }[];
   changeCount: number;
 }
 
@@ -80,6 +84,9 @@ export function diffModels(from: DataModel, to: DataModel): ModelDiff {
     tablesChanged: [],
     relationshipsAdded: [],
     relationshipsRemoved: [],
+    objectsAdded: [],
+    objectsRemoved: [],
+    objectsChanged: [],
     changeCount: 0,
   };
 
@@ -135,7 +142,18 @@ export function diffModels(from: DataModel, to: DataModel): ModelDiff {
   d.relationshipsAdded = tr.filter((r) => !frk.has(relKey(r)));
   d.relationshipsRemoved = fr.filter((r) => !trk.has(relKey(r)));
 
+  const okey = (o: DbObject) => `${o.kind}:${key(o.name)}`;
+  const fo = new Map(objectsOf(from).map((o) => [okey(o), o]));
+  const too = new Map(objectsOf(to).map((o) => [okey(o), o]));
+  d.objectsAdded = objectsOf(to).filter((o) => !fo.has(okey(o)));
+  d.objectsRemoved = objectsOf(from).filter((o) => !too.has(okey(o)));
+  for (const o of objectsOf(to)) {
+    const old = fo.get(okey(o));
+    if (old && normalizeDefinition(old.definition) !== normalizeDefinition(o.definition)) d.objectsChanged.push({ from: old, to: o });
+  }
+
   d.changeCount =
+    d.objectsAdded.length + d.objectsRemoved.length + d.objectsChanged.length +
     d.tablesAdded.length + d.tablesRemoved.length + d.relationshipsAdded.length + d.relationshipsRemoved.length +
     d.tablesChanged.reduce(
       (n, t) =>
@@ -230,6 +248,16 @@ export function generateMigration(from: DataModel, to: DataModel, dialect: Diale
   } else if (diff.relationshipsAdded.some((r) => !diff.tablesAdded.some((t) => key(t.name) === key(r.fromTable)))) {
     out.push("-- SQLite cannot add foreign keys to existing tables; rebuild the affected tables.", "");
   }
+  const objectsNote = dialect !== to.dialect ? [`-- Object definitions are written for ${to.dialect}; adapt them for ${dialect}.`] : [];
+  if (diff.objectsRemoved.length || diff.objectsChanged.length) {
+    out.push("-- Drop removed and changed objects");
+    for (const o of [...diff.objectsRemoved, ...diff.objectsChanged.map((c) => c.from)]) out.push(dropObjectSQL(o, d));
+    out.push("");
+  }
+  if (diff.objectsAdded.length || diff.objectsChanged.length) {
+    out.push("-- Create new and changed objects", ...objectsNote);
+    for (const o of [...diff.objectsAdded, ...diff.objectsChanged.map((c) => c.to)]) out.push(objectSQL(o, d), "");
+  }
   if (diff.tablesRemoved.length) {
     out.push("-- Removed tables");
     for (const t of diff.tablesRemoved) out.push(`DROP TABLE ${tableRef(d, t)};`);
@@ -253,5 +281,8 @@ export function describeDiff(diff: ModelDiff): string {
   const r = (x: RelN) => `${x.fromTable}(${x.fromColumns.join(",")}) → ${x.toTable}(${x.toColumns.join(",")})`;
   diff.relationshipsAdded.forEach((x) => l.push(`+ foreign key ${r(x)}`));
   diff.relationshipsRemoved.forEach((x) => l.push(`- foreign key ${r(x)}`));
+  diff.objectsAdded.forEach((o) => l.push(`+ ${kindInfo(o.kind).label.toLowerCase()} ${o.name}`));
+  diff.objectsRemoved.forEach((o) => l.push(`- ${kindInfo(o.kind).label.toLowerCase()} ${o.name}`));
+  diff.objectsChanged.forEach((o) => l.push(`~ ${kindInfo(o.to.kind).label.toLowerCase()} ${o.to.name}: definition changed`));
   return l.join("\n") || "No differences.";
 }

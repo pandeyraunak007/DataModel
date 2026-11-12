@@ -65,6 +65,22 @@ export interface Relationship {
   onUpdate?: RefAction;
 }
 
+export type DbObjectKind =
+  | "view" | "materialized_view" | "sequence" | "function" | "procedure" | "trigger" | "type"
+  | "extension" | "synonym" | "event" | "stage" | "file_format" | "stream" | "task";
+
+/** A database object other than a table. `definition` is its full CREATE statement. */
+export interface DbObject {
+  id: string;
+  kind: DbObjectKind;
+  name: string;
+  schema?: string;
+  /** Triggers: the table the trigger is on. */
+  table?: string;
+  definition: string;
+  comment?: string;
+}
+
 export type Pattern = "STAR_SCHEMA" | "SNOWFLAKE_SCHEMA" | "THIRD_NORMAL_FORM" | "DATA_VAULT_2" | "CANONICAL" | "CUSTOM";
 
 /** The modeling context declared in guided setup. */
@@ -90,6 +106,8 @@ export interface DataModel {
   intent?: ModelIntent;
   tables: Table[];
   relationships: Relationship[];
+  /** Views, sequences, routines, triggers and other platform-specific objects. */
+  objects?: DbObject[];
   createdAt: string;
   updatedAt: string;
 }

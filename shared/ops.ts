@@ -14,6 +14,7 @@ const ColumnSpec = z.object({
   classification: z.enum(["pii", "sensitive", "none"]).optional(),
 });
 const RoleZ = z.enum(["fact", "dimension", "hub", "link", "satellite"]);
+const KindZ = z.enum(["view", "materialized_view", "sequence", "function", "procedure", "trigger", "type", "extension", "synonym", "event", "stage", "file_format", "stream", "task"]);
 const RefActionZ = z.enum(["NO ACTION", "CASCADE", "SET NULL", "RESTRICT"]);
 
 export const Operation = z.discriminatedUnion("op", [
@@ -35,6 +36,9 @@ export const Operation = z.discriminatedUnion("op", [
   z.object({ op: z.literal("add_index"), table: z.string(), columns: z.array(z.string()).min(1), name: z.string().optional(), unique: z.boolean().optional() }),
   z.object({ op: z.literal("drop_index"), table: z.string(), name: z.string() }),
   z.object({ op: z.literal("set_model_info"), name: z.string().optional(), description: z.string().optional() }),
+  z.object({ op: z.literal("add_object"), kind: KindZ, name: z.string().min(1), definition: z.string().min(1), schema: z.string().optional(), table: z.string().optional(), comment: z.string().optional() }),
+  z.object({ op: z.literal("update_object"), kind: KindZ, name: z.string(), definition: z.string().optional(), newName: z.string().optional(), comment: z.string().optional() }),
+  z.object({ op: z.literal("drop_object"), kind: KindZ, name: z.string() }),
 ]);
 export type Operation = z.infer<typeof Operation>;
 export const OperationsInput = z.object({ operations: z.array(Operation).min(1) });
@@ -69,6 +73,7 @@ export const operationsJsonSchema = {
             enum: [
               "add_table", "update_table", "drop_table", "rename_table", "set_table_comment", "add_column", "alter_column", "drop_column",
               "add_relationship", "drop_relationship", "add_index", "drop_index", "set_model_info",
+              "add_object", "update_object", "drop_object",
             ],
           },
           table: { type: "string", description: "Table name (all table/column/index ops)" },
@@ -96,6 +101,8 @@ export const operationsJsonSchema = {
           name: { type: "string", description: "add_relationship: constraint name. add_index / drop_index: index name. set_model_info: model name." },
           unique: { type: "boolean", description: "add_index" },
           description: { type: "string", description: "set_model_info" },
+          kind: { type: "string", enum: ["view", "materialized_view", "sequence", "function", "procedure", "trigger", "type", "extension", "synonym", "event", "stage", "file_format", "stream", "task"], description: "add_object / update_object / drop_object: the kind of database object (view, sequence, function, procedure, trigger, ...). Use only kinds the model's platform supports. The object is identified by kind + name." },
+          definition: { type: "string", description: "add_object / update_object: the complete CREATE statement for the object, in the model's dialect" },
         },
         required: ["op"],
       },
@@ -267,6 +274,29 @@ export function applyOperations(input: DataModel, ops: Operation[]): { model: Da
           message = `Dropped index ${op.name}`;
           break;
         }
+        case "add_object": {
+          const list = (model.objects ??= []);
+          if (list.some((o) => o.kind === op.kind && o.name.toLowerCase() === op.name.toLowerCase())) throw new Error(`${op.kind} "${op.name}" already exists`);
+          list.push({ id: uid("o_"), kind: op.kind, name: op.name, schema: op.schema, table: op.table, definition: op.definition, comment: op.comment });
+          message = `Added ${op.kind.replace("_", " ")} ${op.name}`;
+          break;
+        }
+        case "update_object":
+        case "drop_object": {
+          const list = (model.objects ??= []);
+          const o = list.find((x) => x.kind === op.kind && x.name.toLowerCase() === op.name.toLowerCase());
+          if (!o) throw new Error(`${op.kind} "${op.name}" does not exist`);
+          if (op.op === "drop_object") {
+            model.objects = list.filter((x) => x !== o);
+            message = `Dropped ${op.kind.replace("_", " ")} ${o.name}`;
+          } else {
+            if (op.definition) o.definition = op.definition;
+            if (op.comment !== undefined) o.comment = op.comment;
+            if (op.newName) o.name = op.newName;
+            message = `Updated ${op.kind.replace("_", " ")} ${o.name}`;
+          }
+          break;
+        }
         case "set_model_info": {
           if (op.name) model.name = op.name;
           if (op.description !== undefined) model.description = op.description;
@@ -285,7 +315,7 @@ export function applyOperations(input: DataModel, ops: Operation[]): { model: Da
 
 /** Compact text rendering of a model, used as AI context. */
 export function describeModel(m: DataModel): string {
-  const lines = [`Model "${m.name}" — dialect ${m.dialect}, ${m.tables.length} tables, ${m.relationships.length} foreign keys`];
+  const lines = [`Model "${m.name}" — dialect ${m.dialect}, ${m.tables.length} tables, ${m.relationships.length} foreign keys, ${(m.objects ?? []).length} other database objects`];
   if (m.description) lines.push(`Description: ${m.description}`);
   for (const t of m.tables) {
     const tags = [t.role && `role: ${t.role}`, t.subjectArea && `subject area: ${t.subjectArea}`].filter(Boolean).join(", ");
@@ -297,6 +327,10 @@ export function describeModel(m: DataModel): string {
     }
     for (const ix of t.indexes)
       lines.push(`  ${ix.unique ? "UNIQUE " : ""}INDEX ${ix.name} (${ix.columns.map((id) => t.columns.find((c) => c.id === id)?.name).join(", ")})`);
+  }
+  for (const o of m.objects ?? []) {
+    lines.push("", `${o.kind.toUpperCase().replace("_", " ")} ${o.schema ? o.schema + "." : ""}${o.name}${o.comment ? `  -- ${o.comment}` : ""}`);
+    lines.push(...o.definition.trim().split("\n").slice(0, 40).map((l) => "  " + l));
   }
   if (m.relationships.length) lines.push("", "FOREIGN KEYS");
   for (const r of m.relationships) {

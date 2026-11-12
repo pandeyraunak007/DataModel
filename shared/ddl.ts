@@ -1,5 +1,6 @@
 // Forward engineering: model JSON -> DDL for a target dialect.
-import type { Column, DataModel, Dialect, Index, Relationship, Table } from "./types.ts";
+import { kindInfo, KINDS, objectsOf, objectSQL } from "./objects.ts";
+import type { Column, DataModel, DbObject, Dialect, Index, Relationship, Table } from "./types.ts";
 
 const RESERVED = new Set(
   "user order group table select where from index key primary references check default column constraint desc asc limit offset grant role end begin transaction values current date time timestamp level comment schema database view rank row rows".split(
@@ -210,11 +211,25 @@ export function generateDDL(model: DataModel, to: Dialect, opts: DDLOptions = {}
     }
     out.push("");
   }
+  const objects = objectsOf(model);
+  const emit = (list: DbObject[], title: string) => {
+    if (!list.length) return;
+    // Script in dependency-friendly order: views before routines before triggers.
+    list = [...list].sort((a, b) => KINDS.findIndex((k) => k.kind === a.kind) - KINDS.findIndex((k) => k.kind === b.kind));
+    out.push(`-- ${title}`);
+    if (to !== model.dialect) {
+      // Routine and view bodies are dialect-specific; they are carried over as comments, not translated.
+      out.push(`-- Written for ${model.dialect}; review and adapt before running on ${to}.`);
+      for (const o of list) out.push(`-- ${kindInfo(o.kind).label}: ${o.name}`, ...objectSQL(o, model.dialect).split("\n").map((l) => "-- " + l), "");
+    } else for (const o of list) out.push(objectSQL(o, to), "");
+  };
+  emit(objects.filter((o) => kindInfo(o.kind).early), "Types, sequences and other prerequisites");
   for (const t of model.tables) out.push(createTableSQL(model, t, to), "");
   if (to !== "sqlite" && model.relationships.length) {
     out.push("-- Foreign keys");
     for (const r of model.relationships) out.push(fkSQL(model, r, to));
     out.push("");
   }
+  emit(objects.filter((o) => !kindInfo(o.kind).early), "Views, routines, triggers and other objects");
   return out.join("\n");
 }

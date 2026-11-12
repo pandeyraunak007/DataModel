@@ -23,6 +23,7 @@ Keys can also come from the server environment: `ANTHROPIC_API_KEY`, `OPENAI_API
 | `shared/diff.ts` | Model compare and migration scripts |
 | `shared/intent.ts` | Modeling intent: patterns, guardrails, table roles, the context given to the copilot |
 | `shared/validate.ts` | Intent-aware validation rules |
+| `shared/objects.ts` | Database-specific objects (views, sequences, routines, triggers...) per platform |
 | `shared/ops.ts` | Edit operations the copilot uses |
 | `server/introspect.ts` | Reverse engineering from live PostgreSQL, MySQL, SQL Server, SQLite |
 | `server/ai.ts` | Copilot tool loop (Anthropic SDK, plus an OpenAI-compatible client for the other providers) |
